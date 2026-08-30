@@ -1,0 +1,12 @@
+# Per-user plugin settings, written by Obsidian at runtime.
+# This folder doubles as a live plugin install, so this file exists locally
+# but must never be committed.
+data.json
+
+# Obsidian writes these into plugin folders on some platforms
+.hotreload
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+node_modules/

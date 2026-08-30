@@ -1,0 +1,10 @@
+{
+	"id": "obdina",
+	"name": "Obdina",
+	"version": "0.10.0",
+	"minAppVersion": "1.5.0",
+	"description": "Dynalist-style outlining: fold, indent, outdent and move list items together with their subitems.",
+	"author": "chanon",
+	"authorUrl": "https://github.com/chanon",
+	"isDesktopOnly": false
+}
