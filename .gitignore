@@ -10,3 +10,6 @@ data.json
 .DS_Store
 Thumbs.db
 node_modules/
+
+# Local test harness: stub `obsidian` module + fake editor, not part of the plugin
+_t/

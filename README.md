@@ -48,6 +48,13 @@ sibling it swaps with moves as a unit too, so nothing gets stranded.
 - **Fold branch** — collapse the item and everything under it
 - **Fold children** — collapse all descendants, keep the item itself open
 - **Unfold branch** — expand the whole subtree
+- **Toggle fold** — whichever of the two the item currently isn't
+
+Toggle decides from the item's own fold marker, so it is an exact pair with
+fold-branch / unfold-branch and repeated presses alternate cleanly instead of
+getting stuck in a half-folded state. All four resolve the cursor to the line
+you can actually see first, so they work with the cursor anywhere on a collapsed
+item's row.
 
 ### Folds survive edits
 
@@ -62,11 +69,48 @@ At the end of a collapsed item, `Enter` creates the new item **after the whole
 collapsed subtree**, as its sibling — instead of inserting inside the fold,
 where it becomes a child.
 
+### Backspace joins items, not lines
+
+At the **start** of an item, core's `Backspace` joins the line into the one
+above and drags the marker with it — `- a` + `- b` becomes `- a- b`. Obdina
+joins the *text* and drops the marker, with two rules on top:
+
+- **An item with subitems does nothing.** Core's join would re-parent the whole
+  subtree onto a line it was never under, in one keystroke.
+- **The text moves to the previous *visible* item** — a sibling, the parent
+  (when this is its first child), a deeper item in another branch, or a
+  collapsed one. The collapsed case is the one core gets badly wrong: joining
+  across a fold's start tears it open and dumps every hidden child on screen.
+  Obdina appends to the collapsed item's own line and re-applies the fold, so
+  only text moves.
+
+Either way the cursor lands on the seam, before the text it carried up. If the
+line above isn't an item — a heading, a blank line, prose — core handles it
+as usual, as it does for Backspace anywhere but the start of an item.
+
 ### Down / Up step onto folded items
 
 A collapsed item and its hidden subtree share one visual row, which can leave
 the cursor parked on a hidden line and make arrow keys skip the folded item.
 Obdina steps by *visible line* using the fold set instead of screen geometry.
+
+### The cursor stays out of the bullet
+
+Vertical cursor motion in CodeMirror is geometric and carries a goal column, so
+moving from a long line onto a short indented one can drop the cursor into an
+item's leading whitespace. Live Preview then reveals the literal `- ` and the
+item looks like it un-rendered into plain text.
+
+After `Up` / `Down`, Obdina moves such a cursor to the first character of the
+item's text. And when the cursor *starts* on the first character of an item's
+text, it lands on the first character of the next item's text — so moving
+through a list keeps the cursor on the text, whatever each item's indentation
+is, rather than drifting into a deeper item's bullet. Within a soft-wrapped
+item, `Up` / `Down` still move between its visual rows as usual.
+
+It corrects the column *after* CodeMirror's own move rather than replacing it,
+so goal-column memory, soft-wrapped rows and tables all behave exactly as
+before. Clicks, `Home` and `Shift`+arrow selections are untouched.
 
 ### Whole-item selection
 
@@ -88,6 +132,7 @@ settings). **No other hotkeys are set by default** — assign them under
 | Fold children recursively | `Ctrl+Shift+←` |
 | Unfold branch recursively | `Ctrl+Shift+→` |
 | Fold branch recursively | — |
+| Toggle fold recursively | — |
 | Diagnose | — |
 
 Every feature has a toggle in *Settings → Obdina*.
@@ -98,8 +143,15 @@ Every feature has a toggle in *Settings → Obdina*.
 space counts one. Files using tabs, files using spaces, and files mixing both
 all parse correctly. Writes preserve whatever convention the file already uses.
 
-**Edits are single operations.** Each command issues one `replaceRange`, so it's
+**Edits are single operations.** Each command issues one `replaceRange` — or,
+where two distant spans must change together, one editor transaction — so it's
 one undo step and the cursor stays on the same text.
+
+**Commands only fire where the cursor actually is.** Every list command
+resolves the item the cursor is *inside* — the item's own line, or a
+continuation line indented under it. It deliberately does **not** search upward
+past unrelated text, so `Tab` in a paragraph written under a list inserts a tab
+instead of quietly indenting the last item of that list.
 
 **Nothing is half-applied.** With a multi-item selection, every item's move is
 resolved before any edit is made. If one can't move, the whole operation is
@@ -112,7 +164,7 @@ CodeMirror internals:
 
 | Used for | Internal API |
 |---|---|
-| Claiming `Tab` / `Enter` / arrows | `@codemirror/view` `keymap` at `Prec.highest` |
+| Claiming `Tab` / `Enter` / `Backspace` / arrows | `@codemirror/view` `keymap` at `Prec.highest` |
 | Reading the fold set | `@codemirror/language` `foldedRanges` |
 | Reading / writing folds | `MarkdownView.currentMode.getFoldInfo()` / `applyFoldInfo()` |
 | Indent defaults | `vault.getConfig("tabSize" / "useTab")` |

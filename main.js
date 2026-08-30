@@ -23,6 +23,7 @@
  *   fold-branch    fold the item at the cursor and everything under it
  *   fold-children  fold all descendants, keep the item itself open
  *   unfold-branch  expand the whole subtree
+ *   toggle-fold    fold-branch or unfold-branch, whichever the item isn't
  *   indent-item    indent the item AND its subitems one level
  *   outdent-item   outdent the item AND its subitems one level
  *
@@ -70,7 +71,9 @@ const DEFAULT_SETTINGS = {
 	preserveFolds: true,
 	snapSelection: true,
 	smartEnter: true,
+	smartBackspace: true,
 	arrowStepsOverFolds: true,
+	snapCursorPastMarker: true,
 };
 
 const LIST_RE = /^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+/;
@@ -183,6 +186,26 @@ function findListRoot(lines, fenced, from) {
 		if (HEADING_RE.test(lines[i])) return -1;
 	}
 	return -1;
+}
+
+/* The list item the cursor is *inside*: either the item's own line, or a
+ * continuation line indented underneath it.
+ *
+ * This exists because findListRoot() alone is too eager. It searches UPWARD for
+ * a list item, so with the cursor in an ordinary paragraph written directly
+ * below a list, it happily returns the last item of that list — and Tab then
+ * indents an item the cursor isn't even on, instead of inserting a tab. The
+ * indent test is what separates a genuine continuation line (indented under its
+ * item) from unrelated flush-left prose. */
+function enclosingItem(lines, fenced, from, tabWidth) {
+	if (from < 0 || from >= lines.length) return -1;
+	if (fenced[from] || isBlank(lines[from])) return -1;
+	if (LIST_RE.test(lines[from])) return from;
+	const col = indentColumns(lines[from], tabWidth);
+	if (col === 0) return -1; // flush-left text is never part of an item
+	const r = findListRoot(lines, fenced, from);
+	if (r < 0) return -1;
+	return indentColumns(lines[r], tabWidth) < col ? r : -1;
 }
 
 /* Previous *sibling*: the nearest earlier list item at exactly the same column.
@@ -312,6 +335,46 @@ function foldStartCovering(folds, line) {
 	return found;
 }
 
+/* Where an item's text begins: past the indent, the bullet, and a task
+ * checkbox. 0 for anything that isn't a list item.
+ *
+ * This is the one column a cursor may not sit before. Live Preview hides the
+ * literal "- " behind a rendered bullet, but reveals it the moment the cursor
+ * enters that region — so a cursor parked in the indent makes the item visibly
+ * un-render into plain text. */
+function markerTextStart(text) {
+	const m = ITEM_PARTS_RE.exec(text);
+	return m ? m[0].length : 0;
+}
+
+/* Is the cursor sitting exactly on the first character of an item's text? */
+function atItemTextStart(text, ch) {
+	const start = markerTextStart(text);
+	return start > 0 && ch === start;
+}
+
+/* Where a vertical arrow move should leave the cursor on the line it arrives at.
+ *
+ * `landed`   the column it would otherwise end up on
+ * `anchored` it was exactly at the start of an item's text before the move
+ *
+ * The two rules are deliberately different, not one generalised rule:
+ *
+ *   anchored  -> land exactly on the target's text start. This may move the
+ *                cursor BACKWARD (leaving a deeply indented item for a
+ *                shallower one), because what is being tracked is the start of
+ *                the text, not a visual column.
+ *   otherwise -> only ever pull FORWARD, out of the indent and marker. Anything
+ *                more would override CodeMirror's goal column on every press.
+ */
+function landingColumn(toText, landed, anchored) {
+	const start = markerTextStart(toText);
+	const capped = Math.min(landed, toText.length);
+	if (start === 0) return capped; // not a list item — leave it alone
+	if (anchored) return start;
+	return Math.min(toText.length, Math.max(capped, start));
+}
+
 /* The prefix for a new sibling of `line`: same indentation and bullet, ordered
  * numbers incremented, and a task checkbox reset to unchecked — so Enter after
  * "- [x] done" gives a fresh "- [ ] ", matching Obsidian core. */
@@ -337,13 +400,21 @@ function docLine(doc, n) {
 	return doc.line(Math.max(1, Math.min(n, doc.lines)));
 }
 
-/* Nearest list-item line at or above `n`. Bounded so a selection in ordinary
- * prose can't walk the entire document looking for a list. */
-function docItemRoot(doc, n) {
+/* The list item line `n` belongs to — itself, or the item it is a continuation
+ * of. The CodeMirror-doc twin of enclosingItem(), and it needs the same indent
+ * test: without it, dragging a selection through a paragraph written under a
+ * list would snap the selection onto that list. Bounded so a selection in
+ * ordinary prose can't walk the entire document looking for a list. */
+function docItemRoot(doc, n, tabWidth) {
+	const start = docLine(doc, n).text;
+	if (LIST_RE.test(start)) return n;
+	if (start.trim() === "") return -1;
+	const col = columnsOf(leadingWs(start), tabWidth);
+	if (col === 0) return -1; // flush-left text is never part of an item
 	const limit = Math.max(1, n - 500);
-	for (let i = n; i >= limit; i--) {
+	for (let i = n - 1; i >= limit; i--) {
 		const text = docLine(doc, i).text;
-		if (LIST_RE.test(text)) return i;
+		if (LIST_RE.test(text)) return columnsOf(leadingWs(text), tabWidth) < col ? i : -1;
 		if (HEADING_RE.test(text)) return -1;
 		if (text.trim() === "") return -1;
 	}
@@ -379,6 +450,7 @@ class ObdinaPlugin extends Plugin {
 						{ key: "Tab", run: () => this.handleTab("indent") },
 						{ key: "Shift-Tab", run: () => this.handleTab("outdent") },
 						{ key: "Enter", run: () => this.handleEnter() },
+						{ key: "Backspace", run: () => this.handleBackspace() },
 						{ key: "ArrowDown", run: () => this.handleArrow(1) },
 						{ key: "ArrowUp", run: () => this.handleArrow(-1) },
 					])
@@ -404,6 +476,11 @@ class ObdinaPlugin extends Plugin {
 			id: "fold-children",
 			name: "Fold children recursively (keep this item open)",
 			editorCallback: (editor, ctx) => this.runFold(editor, ctx, "fold", false),
+		});
+		this.addCommand({
+			id: "toggle-fold",
+			name: "Toggle fold recursively (collapse or expand this item and all below it)",
+			editorCallback: (editor, ctx) => this.runFold(editor, ctx, "toggle", true),
 		});
 		this.addCommand({
 			id: "unfold-branch",
@@ -448,6 +525,13 @@ class ObdinaPlugin extends Plugin {
 	 * events a mouse drag produces.
 	 */
 	onSelectionUpdate(update) {
+		// Consumed whether or not it applies, so a press that lands somewhere
+		// harmless can't leave the flag set for a later click to trip over.
+		if (this._snapMarkerArmed) {
+			this._snapMarkerArmed = false;
+			if (update.selectionSet && !update.docChanged) this.snapCursorPastMarker(update.view, update.startState);
+		}
+
 		if (!this.settings.snapSelection) return;
 		if (!update.selectionSet || update.docChanged) return;
 		if (this._snapPending) return;
@@ -483,8 +567,8 @@ class ObdinaPlugin extends Plugin {
 			if (toLineNo > fromLineNo && r.to === docLine(doc, toLineNo).from) toLineNo--;
 			if (fromLineNo === toLineNo) return r; // single line: leave alone
 
-			const startRoot = docItemRoot(doc, fromLineNo);
-			const endRoot = docItemRoot(doc, toLineNo);
+			const startRoot = docItemRoot(doc, fromLineNo, tabWidth);
+			const endRoot = docItemRoot(doc, toLineNo, tabWidth);
 			if (startRoot < 0 || endRoot < 0) return r; // not a list selection
 
 			const from = docLine(doc, startRoot).from;
@@ -501,6 +585,96 @@ class ObdinaPlugin extends Plugin {
 
 		if (!changed) return null;
 		return cmEditorSelection.create(ranges, state.selection.mainIndex);
+	}
+
+	/*
+	 * Fix up the column after an Up/Down move, in two cases:
+	 *
+	 *   - the cursor landed inside a list item's indent or marker
+	 *   - it was on the first character of an item's text before the move, so
+	 *     it should arrive on the first character of the next item's text
+	 *
+	 * Vertical motion in CodeMirror is geometric and carries a goal column, so
+	 * moving from a long line onto a short indented one can drop the cursor
+	 * anywhere in the leading whitespace. Live Preview then reveals the raw
+	 * "- " and the item appears to turn into plain text.
+	 *
+	 * Deliberately a *post*-correction rather than a reimplementation of
+	 * Up/Down: CodeMirror keeps its goal column, soft-wrapped rows, tables and
+	 * every other case it already handles, and we only adjust the column it
+	 * arrived at. Only runs when handleArrow armed it, so clicks, Home, and
+	 * Shift+arrow selections are never touched.
+	 */
+	snapCursorPastMarker(view, startState) {
+		try {
+			const state = view.state;
+			if (state.selection.ranges.length !== 1) return;
+			const head = state.selection.main;
+			if (!head.empty) return;
+
+			const line = state.doc.lineAt(head.head);
+			// A "- " inside a code block is literal text, not a marker.
+			if (this.fencedFor(state)[line.number - 1]) return;
+
+			/* Where the cursor was BEFORE this move. CodeMirror's ViewUpdate
+			 * carries the whole pre-transaction state, so this needs nothing
+			 * captured in handleArrow — the arming flag stays a plain boolean. */
+			let anchored = false;
+			if (startState) {
+				const prev = startState.selection.main;
+				if (prev.empty) {
+					const prevLine = startState.doc.lineAt(prev.head);
+					/* Only when the move actually left the line. A soft-wrapped
+					 * item is several visual rows of ONE document line, so
+					 * Up/Down inside it starts and ends on the same line — and
+					 * re-anchoring there would drag the cursor back to the text
+					 * start every time, making it impossible to move off the
+					 * first row at all.
+					 *
+					 * The forward pull below still applies: coming back UP into
+					 * the first row can land in the marker, and pulling out of
+					 * it can only move the cursor within that row. */
+					anchored =
+						prevLine.number !== line.number &&
+						atItemTextStart(prevLine.text, prev.head - prevLine.from);
+				}
+			}
+
+			const to = line.from + landingColumn(line.text, head.head - line.from, anchored);
+			if (to === head.head) return;
+
+			// Same reason as snapSelection: dispatching synchronously from
+			// inside an update throws "calls to update are not allowed while an
+			// update is in progress".
+			Promise.resolve().then(() => {
+				try {
+					if (view.state.doc !== state.doc) return; // document moved on
+					view.dispatch({ selection: cmEditorSelection.cursor(to) });
+				} catch (e) {
+					/* never let a cursor tweak break arrow keys */
+				}
+			});
+		} catch (e) {
+			/* ditto */
+		}
+	}
+
+	/*
+	 * Fence map for the current document, cached until the document changes.
+	 *
+	 * computeFenced() has to split the whole note, which is far too much to do
+	 * on every arrow press in a 4000-line file — the same cost that keeps
+	 * selection snapping from checking fences at all. Caching moves it to once
+	 * per edit, and only when something actually asks. CodeMirror's Text is
+	 * immutable and replaced on every change, so the object itself is an exact
+	 * cache key: no generation counter, no invalidation to get wrong.
+	 */
+	fencedFor(state) {
+		const doc = state.doc;
+		if (this._fenceCache && this._fenceCache.doc === doc) return this._fenceCache.fenced;
+		const fenced = computeFenced(doc.toString().split("\n"));
+		this._fenceCache = { doc, fenced };
+		return fenced;
 	}
 
 	/*
@@ -608,6 +782,7 @@ class ObdinaPlugin extends Plugin {
 			// The single most important field: did our keymap binding run at
 			// all on your last Enter press, and where did it exit?
 			lastEnterPress: this._lastEnter || "handleEnter() has NEVER run — our Enter binding is not reaching the keymap",
+			lastBackspacePress: this._lastBackspace || "handleBackspace() has not run since load",
 			suggestOpenNow: (() => {
 				try {
 					return {
@@ -738,8 +913,18 @@ class ObdinaPlugin extends Plugin {
 	 * normal handling — soft-wrapped rows, goal-column memory, tables — is
 	 * untouched. */
 	handleArrow(dir) {
+		/* Arm the marker snap for whichever code moves the cursor next — the
+		 * fold logic below, or CodeMirror when we hand the key back. Done first,
+		 * and independently of arrowStepsOverFolds, so it applies to every
+		 * genuine Up/Down press.
+		 *
+		 * CodeMirror matches modifiers exactly, so these bindings never fire for
+		 * Shift+Up/Down. Selection extension is therefore untouched for free. */
+		const suggesting = this.isSuggestOpen();
+		if (this.settings.snapCursorPastMarker && !suggesting) this._snapMarkerArmed = true;
+
 		if (!this.settings.arrowStepsOverFolds) return false;
-		if (this.isSuggestOpen()) return false;
+		if (suggesting) return false;
 
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 		const editor = view && view.editor;
@@ -784,7 +969,13 @@ class ObdinaPlugin extends Plugin {
 		}
 		if (target < 0 || target > editor.lastLine()) return false;
 
-		editor.setCursor({ line: target, ch: Math.min(cur.ch, editor.getLine(target).length) });
+		const targetText = editor.getLine(target);
+		// Same rule the post-move listener applies, inline because this path
+		// sets the cursor itself rather than handing the key back.
+		const ch = this.settings.snapCursorPastMarker
+			? landingColumn(targetText, cur.ch, atItemTextStart(editor.getLine(cur.line), cur.ch))
+			: Math.min(cur.ch, targetText.length);
+		editor.setCursor({ line: target, ch });
 		return true;
 	}
 
@@ -905,6 +1096,192 @@ class ObdinaPlugin extends Plugin {
 		return true;
 	}
 
+	/* ── Backspace at the start of an item ──────────────────────────────
+	 * At the start of an item, core's Backspace joins the line into the one
+	 * above — dragging the marker along, so "- a" + "- b" becomes "- a- b".
+	 * An outliner joins the *text* and drops the marker. Obdina does that, with
+	 * two rules on top:
+	 *
+	 * (1) An item WITH children is never merged away. Core's join silently
+	 *     re-parents the whole subtree onto a line it was never under, and
+	 *     since the join also rewrites indentation, undo is the only way back.
+	 *     Obdina swallows the keypress: structural damage should cost more
+	 *     than one key.
+	 *
+	 * (2) The text moves to the previous *visible item*, whatever its relation
+	 *     — a sibling, a parent (i.e. this is its first child), a deeper item
+	 *     in another branch, or a COLLAPSED item. The collapsed case is the
+	 *     one core gets badly wrong: a fold is a replace decoration over the
+	 *     hidden subtree, so joining across its start tears it open and dumps
+	 *     every hidden child on screen. Obdina appends to the collapsed item's
+	 *     own line and re-applies the fold, so only text moves.
+	 *
+	 * Either way the cursor lands on the seam, before the text it carried up,
+	 * so a mistake is obvious and one undo away.
+	 *
+	 * Everything else — mid-text, prose, headings, code fences, selections —
+	 * returns false and core deletes exactly as it always has. */
+	handleBackspace() {
+		// Same tracing discipline as handleEnter: every exit is recorded so a
+		// "nothing happened" is a lookup, not a re-derivation.
+		const bail = (reason, extra) => {
+			this._lastBackspace = { at: new Date().toISOString(), fired: true, handled: false, reason, extra };
+			return false;
+		};
+		const done = (reason) => {
+			this._lastBackspace = { at: new Date().toISOString(), fired: true, handled: true, reason };
+			return true;
+		};
+
+		if (!this.settings.smartBackspace) return bail("smartBackspace setting is off");
+		if (this.isSuggestOpen()) return bail("an editor suggest popup is open");
+
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		const editor = view && view.editor;
+		const sub = view && view.currentMode;
+		if (!editor) return bail("no active markdown editor");
+
+		const sels = editor.listSelections();
+		if (sels.length !== 1) return bail("more than one selection", sels.length);
+		const sel = sels[0];
+		if (sel.anchor.line !== sel.head.line || sel.anchor.ch !== sel.head.ch)
+			return bail("selection is not empty", JSON.stringify(sel));
+		const cur = sel.head;
+
+		const lines = editor.getValue().split("\n");
+		const line = lines[cur.line];
+		if (line == null) return bail("cursor line out of range", cur.line);
+
+		const fenced = computeFenced(lines);
+		if (fenced[cur.line]) return bail("cursor is inside a code fence");
+
+		// The cursor's own line must BE an item. A continuation line is not the
+		// start of anything, so it is left to core.
+		const parts = ITEM_PARTS_RE.exec(line);
+		if (!parts) return bail("line is not a list item", JSON.stringify(line));
+		const textStart = parts[0].length;
+
+		/* "The beginning of the line" has two meanings in a list: column 0, and
+		 * the first character of the item's text (which is where Home lands in
+		 * Live Preview, since the marker renders as a bullet). Both count.
+		 * A position *inside* the indent or the marker is ordinary character
+		 * deletion and belongs to core — stealing it would make it impossible
+		 * to fix a mistyped "- [x]". */
+		if (cur.ch !== 0 && cur.ch !== textStart)
+			return bail("cursor is not at the start of the item", "ch=" + cur.ch + " textStart=" + textStart);
+
+		/* (1) Refuse to merge an item that owns a subtree. listBranchEnd()
+		 * measures in visual columns, so this is correct in tab files, space
+		 * files and mixed ones alike — and it counts hidden lines, so a folded
+		 * item is caught here and never reaches case (2). */
+		if (listBranchEnd(lines, cur.line, this.tabWidth()) > cur.line)
+			return done("no-op — item on line " + cur.line + " has children");
+
+		const above = cur.line - 1;
+		if (above < 0) return bail("cursor is on the first line");
+
+		const folds = this.foldLines(editor, sub);
+
+		/* The trap this plugin was largely built around: a fold is one visual
+		 * row, so a cursor can sit on a HIDDEN line at the far end of a
+		 * collapsed range. If the cursor line is hidden then so is the line
+		 * above it — they are the same row — and every question below would be
+		 * asked about lines the user cannot see. Hand those back to core.
+		 *
+		 * This guard is also what makes the fold remap at the bottom sound:
+		 * with the cursor line known visible, no fold can start above it and
+		 * end at or after it, so the only folds needing a shift are the ones
+		 * entirely below the deleted line. */
+		if (foldStartCovering(folds, cur.line) >= 0) return bail("cursor is parked on a hidden line", cur.line);
+
+		/* (2) Find the previous VISIBLE item. If the line above is hidden,
+		 * foldStartCovering() walks out through any nesting and names the
+		 * collapsed item that owns it — the item actually on screen above the
+		 * cursor. Otherwise the line above is itself what the user sees. */
+		const covering = foldStartCovering(folds, above);
+		const top = covering >= 0 ? covering : above;
+		const target = lines[top];
+		if (target == null) return bail("resolved line above out of range", top);
+		if (fenced[top]) return bail("the line above is inside a code fence");
+		// Headings fold too, and prose can sit between items. Appending an
+		// item's text to either is never what was meant.
+		const targetParts = ITEM_PARTS_RE.exec(target);
+		if (!targetParts) return bail("the line above is not a list item", JSON.stringify(target));
+
+		/* Where the text lands: the end of the target's own text. Clamped to
+		 * the end of its marker, because an EMPTY item ("- ") trims back to
+		 * "-" — inserting there would swallow the space and fuse the marker
+		 * into the word. */
+		const at = Math.max(target.replace(/\s+$/, "").length, targetParts[0].length);
+		const moved = line.slice(textStart); // this item's text, marker discarded
+		const caret = { line: top, ch: at };
+		const lineEnd = { line: cur.line, ch: line.length };
+
+		if (top === above) {
+			/* Nothing hidden in between, so the whole join is one contiguous
+			 * span: replace from the insertion point through the end of this
+			 * line with the text being carried up. One replaceRange, one undo
+			 * step — the rule every other command in this file follows. */
+			editor.replaceRange(moved, caret, lineEnd);
+			editor.setCursor(caret);
+		} else {
+			/* A collapsed subtree sits between the two lines. Rewriting that
+			 * whole span to move a few characters would churn every hidden
+			 * line, so instead: two changes in ONE transaction — insert at the
+			 * target, delete this line along with its preceding newline. Same
+			 * one-undo-step guarantee.
+			 *
+			 * Both ranges are in ORIGINAL document coordinates and must not
+			 * overlap. They can't: a fold hides only lines strictly below its
+			 * start, so `top` is at least two lines above the cursor. */
+			const changes = [
+				{ from: caret, to: caret, text: moved },
+				{ from: { line: above, ch: lines[above].length }, to: lineEnd, text: "" },
+			];
+			try {
+				editor.transaction({ changes, selection: { from: caret, to: caret } });
+			} catch (e) {
+				// Multi-change transactions are the documented API, but this
+				// plugin never lets an API surprise break a keystroke. Fall
+				// back to two edits: same result, two undo steps.
+				editor.replaceRange("", { line: above, ch: lines[above].length }, lineEnd);
+				editor.replaceRange(moved, caret, caret);
+				editor.setCursor(caret);
+			}
+		}
+
+		/* Second exception to "edits preserve line count", so it needs its own
+		 * remap rather than restoreFolds(): exactly one line disappears at
+		 * cur.line. Anything the merge target owns ends above the deletion and
+		 * survives unchanged; every fold below the deleted line slides up one.
+		 *
+		 * Re-applying is not cosmetic in the collapsed case. The insertion
+		 * lands on the fold's exact start position, and CodeMirror is free to
+		 * map that range so the new text falls *inside* the collapsed region —
+		 * i.e. the text just carried up becomes invisible. applyFoldInfo()
+		 * re-derives the range from the line in the new document, which puts it
+		 * back on the visible side. */
+		if (this.settings.preserveFolds && folds.length && sub && typeof sub.applyFoldInfo === "function") {
+			const remapped = folds
+				.map((f) => ({
+					from: f.from > cur.line ? f.from - 1 : f.from,
+					to: f.to >= cur.line ? f.to - 1 : f.to,
+				}))
+				.filter((f) => f.to > f.from)
+				.sort((a, b) => a.from - b.from);
+			try {
+				const apply = () => sub.applyFoldInfo({ folds: remapped, lines: lines.length - 1 });
+				apply();
+				requestAnimationFrame(apply);
+			} catch (e) {
+				/* undocumented API — a lost fold beats a broken key */
+			}
+		}
+
+		return done(
+			"merged line " + cur.line + " into the " + (covering >= 0 ? "folded" : "visible") + " item on line " + top
+		);
+	}
 	tabWidth() {
 		try {
 			const n = this.app.vault.getConfig("tabSize");
@@ -961,7 +1338,10 @@ class ObdinaPlugin extends Plugin {
 			roots.push({ start: i, end: listBranchEnd(lines, i, tabWidth) });
 		}
 		if (!roots.length) {
-			const r = findListRoot(lines, fenced, selFrom);
+			// enclosingItem(), not findListRoot(): the cursor must be ON an item or
+			// on one of its continuation lines. Otherwise Tab in a paragraph below a
+			// list would indent the last item of that list.
+			const r = enclosingItem(lines, fenced, selFrom, tabWidth);
 			if (r < 0) {
 				if (!quiet) new Notice("Obdina: no list item at the cursor.");
 				return false;
@@ -1217,11 +1597,29 @@ class ObdinaPlugin extends Plugin {
 		const lines = editor.getValue().split("\n");
 		const fenced = computeFenced(lines);
 		const tabWidth = this.tabWidth();
-		const root = findBranchRoot(lines, fenced, editor.getCursor().line);
+
+		/* Resolve the cursor to the line the user can actually SEE before
+		 * looking for a branch root. A fold is a replace decoration, so the
+		 * collapsed subtree shares one visual row with the item that owns it,
+		 * and pressing End or clicking past the fold marker parks the cursor on
+		 * the fold's last HIDDEN line. findBranchRoot() would then resolve to
+		 * some nested item inside the collapsed subtree, and every fold command
+		 * would act on an item that isn't on screen. */
+		const liveFolds = this.foldLines(editor, subView);
+		const cursorLine = editor.getCursor().line;
+		const covering = foldStartCovering(liveFolds, cursorLine);
+		const root = findBranchRoot(lines, fenced, covering >= 0 ? covering : cursorLine);
 		if (root < 0) {
 			new Notice("Obdina: no heading or list item at the cursor.");
 			return;
 		}
+
+		/* Toggle mirrors what the user sees: an item showing a fold marker
+		 * expands, anything else collapses. Deciding from the item's OWN fold
+		 * (rather than "is anything inside folded?") keeps the command an exact
+		 * pair with fold-branch / unfold-branch, so repeated presses alternate
+		 * instead of getting stuck in a half-folded state. */
+		if (mode === "toggle") mode = foldEndAt(liveFolds, root) >= 0 ? "unfold" : "fold";
 
 		const hm = HEADING_RE.exec(lines[root]);
 		const branchEnd = hm
@@ -1367,6 +1765,23 @@ class ObdinaSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Keep the cursor out of the bullet")
+			.setDesc(
+				cmKeymap
+					? "After Up / Down: move a cursor that landed in an item's indent or marker to the first character of its text \u2014 Live Preview shows the raw \u201c- \u201d while the cursor is in there, which makes the item look like it un-rendered. And when the cursor starts at an item's text, keep it there as it moves between items."
+					: "Unavailable \u2014 this Obsidian build doesn't expose CodeMirror to plugins."
+			)
+			.addToggle((t) =>
+				t
+					.setValue(this.plugin.settings.snapCursorPastMarker && !!cmKeymap)
+					.setDisabled(!cmKeymap)
+					.onChange(async (v) => {
+						this.plugin.settings.snapCursorPastMarker = v;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
 			.setName("Enter after a folded item starts the next item below it")
 			.setDesc(
 				cmKeymap
@@ -1379,6 +1794,23 @@ class ObdinaSettingTab extends PluginSettingTab {
 					.setDisabled(!cmKeymap)
 					.onChange(async (v) => {
 						this.plugin.settings.smartEnter = v;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Backspace respects structure and folds")
+			.setDesc(
+				cmKeymap
+					? "At the start of an item: do nothing if the item has subitems, so Backspace can never re-parent a subtree. And if the item above is collapsed, append this item's text to it without expanding it. Backspace anywhere else is untouched."
+					: "Unavailable — this Obsidian build doesn't expose CodeMirror to plugins."
+			)
+			.addToggle((t) =>
+				t
+					.setValue(this.plugin.settings.smartBackspace && !!cmKeymap)
+					.setDisabled(!cmKeymap)
+					.onChange(async (v) => {
+						this.plugin.settings.smartBackspace = v;
 						await this.plugin.saveSettings();
 					})
 			);
