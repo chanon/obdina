@@ -956,8 +956,28 @@ class ObdinaPlugin extends Plugin {
 		let target;
 		if (dir > 0) {
 			const end = foldEndAt(folds, here);
-			if (end < 0) return false; // this line isn't folded — core is correct
-			target = end + 1;
+			if (end >= 0) {
+				// LEAVING a collapsed item: skip its whole hidden subtree.
+				target = end + 1;
+			} else if (foldEndAt(folds, here + 1) >= 0) {
+				/* ENTERING one. The mirror of the `foldStartCovering(above)`
+				 * case in the Up branch below, and it was missing — Down simply
+				 * trusted core to land on the collapsed row.
+				 *
+				 * That trust is misplaced. Core moves vertically by geometry,
+				 * and a collapsed row's only hit-testable content past the item
+				 * text is the .cm-foldPlaceholder widget. Style that widget
+				 * `display: none` and the row stops being a landing target, so
+				 * Down sails straight over the folded item. Claiming the key
+				 * makes the step deterministic instead of dependent on CSS.
+				 *
+				 * here + 1 is always a visible line: `here` is visible, so any
+				 * fold hiding here + 1 would have to start at or before `here`,
+				 * and either case contradicts foldEndAt(here) < 0. */
+				target = here + 1;
+			} else {
+				return false; // no fold adjacent — core is correct
+			}
 		} else {
 			const above = here - 1;
 			if (above < 0) return false;
