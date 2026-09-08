@@ -17,10 +17,21 @@ Obsidian's core `Tab` is generic text indentation with a list-flavoured name —
 it shifts only the cursor's line, so any children silently stop being children.
 Obdina moves the branch as a unit.
 
-It also **detects the indent style per file** and preserves it. A tab-indented
-note stays tabs, a 4-space note stays spaces. Nesting depth is measured in
-*visual columns*, never in a specific whitespace character, so files that mix
-both are read correctly instead of throwing.
+Nesting depth is measured in *visual columns*, never in a specific whitespace
+character, so files that mix tabs and spaces are read correctly instead of
+throwing.
+
+For **writing**, *Indent with* offers three choices:
+
+| | |
+|---|---|
+| **Match each file** (default) | A tab-indented note stays tabs, a space-indented note stays spaces — nothing is silently converted |
+| **Always tabs** | Predictable, and normalises files as you edit |
+| **Always spaces** | Likewise, using your Obsidian tab size |
+
+Matching is the safe default, but a file that mixes both is decided by whichever
+style is in the majority — which can flip as you edit. Force one if you want
+certainty.
 
 ### Dynalist-style outdent (optional)
 
@@ -42,6 +53,64 @@ Without it, `c` would become a child of `b`.
 
 Move an item up or down among its siblings, carrying its whole subtree. The
 sibling it swaps with moves as a unit too, so nothing gets stranded.
+
+### Indent without subitems
+
+`Tab` moves an item **with** its subtree. The *Indent item, leave subitems
+behind* command moves only the item — its children keep their columns, which
+promotes them to siblings of the line that just moved:
+
+```
+- one                    - one
+- two          →           - two
+  - a                      - a
+  - b                      - b
+```
+
+Useful whenever you want an item to join a group rather than take its group
+with it.
+
+### Nesting completed recurring tasks
+
+With the [Tasks](https://publish.obsidian.md/tasks/) plugin, completing a
+recurring task adds the next instance on the line above and leaves the completed
+one beside it. Turn on *Nest completed recurring tasks under the new one* and
+Obdina tucks the finished line under the live one, so each task carries a
+foldable log of itself:
+
+```
+- [ ] pay bill  [repeat:: every month]  [due:: 2026-10-25]
+  - [x] pay bill  [repeat:: every month]  [due:: 2026-09-25]  [completion:: …]
+  - [x] pay bill  [repeat:: every month]  [due:: 2026-08-25]  [completion:: …]
+```
+
+It indents **only** the completed line, so earlier history stays flat instead of
+sinking a level deeper every time. If the task was collapsed when you completed
+it, the fold moves up to the new instance — so it stays one collapsed row rather
+than becoming a collapsed row with nothing inside it. Off by default, and deliberately narrow: it
+fires only when the line above is an *open* instance of the *same* task at the
+*same* indent, and never on undo or redo.
+
+Requires the Tasks setting **“Next recurrence appears on the line below”** to be
+**off** (its default), so the new instance lands above the completed one. Obdina
+reads that setting and warns you in its own settings if it is on, rather than
+quietly doing nothing.
+
+### Delete item
+
+Deletes the item at the cursor **with its subitems**, and leaves the cursor at
+the **end of the previous line** — the outliner convention.
+
+Obsidian's own *Delete paragraph* is CodeMirror's `deleteLine`, which places the
+cursor with `moveVertically(range, true)`: it moves *down* a line and maps that
+through the deletion, so you land on the following line. It is also geometric,
+which makes it unreliable next to a collapsed row. This command works from the
+fold set instead, so it behaves around folds, and on a non-list line it deletes
+just that line — so you can bind it over *Delete paragraph* without losing
+anything in ordinary prose.
+
+The cursor's **own** item is what goes: putting the cursor on a child and
+pressing delete removes that child, not the parent branch.
 
 ### Recursive folding
 
@@ -118,6 +187,28 @@ When a selection spans more than one list item, expand it to whole items and
 their subtrees rather than cutting through lines. Selections within a single
 line are left alone.
 
+Snapping only ever *grows* a selection, so it steps aside when you are
+**shrinking one with the keyboard** — otherwise `Shift+Up` would pull the head
+off the last item and the snap would put it straight back, forever. Dragging
+snaps in both directions; `Shift+Arrow` grows by whole items and shrinks by
+lines.
+
+### Optional outline cosmetics
+
+Two appearance tweaks, both **off by default** — enabling the plugin never
+restyles your notes until you ask it to:
+
+- **Make collapsed bullets larger** — Obsidian already recolors a collapsed
+  item's bullet; this adds size to that signal. Most useful if you hide the
+  “…” fold marker, since the bullet is then the only inline cue.
+- **Add space between bullet and text** — Obsidian has no setting for this gap;
+  it is just the literal space after the `-` in your note. This adds a visual
+  margin without touching the text. Checkboxes get a matching nudge.
+
+Both are driven by CSS variables, so a snippet can retune them without turning
+the feature off: `--obdina-collapsed-bullet-size`, `--obdina-bullet-gap`,
+`--obdina-checkbox-gap`.
+
 ## Commands and hotkeys
 
 `Tab` / `Shift+Tab` are claimed automatically (and can be turned off in
@@ -128,6 +219,8 @@ settings). **No other hotkeys are set by default** — assign them under
 |---|---|
 | Indent item and subitems | `Ctrl+]` |
 | Outdent item and subitems | `Ctrl+[` |
+| Indent item, leave subitems behind | — |
+| Delete item and subitems | `Ctrl+Shift+Backspace` |
 | Move item and subitems up / down | `Ctrl+Shift+↑` / `Ctrl+Shift+↓` |
 | Fold children recursively | `Ctrl+Shift+←` |
 | Unfold branch recursively | `Ctrl+Shift+→` |
@@ -194,7 +287,7 @@ copies a full state dump to your clipboard for a bug report.
 
 **From Obsidian** — *Settings → Community plugins → Browse*, search "Obdina".
 
-**Manually** — download `main.js` and `manifest.json` from the
+**Manually** — download `main.js`, `manifest.json` and `styles.css` from the
 [latest release](https://github.com/chanon/obdina/releases/latest) into
 `<vault>/.obsidian/plugins/obdina/`, then reload Obsidian and enable it under
 *Settings → Community plugins*.

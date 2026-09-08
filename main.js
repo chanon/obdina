@@ -24,6 +24,7 @@
  *   fold-children  fold all descendants, keep the item itself open
  *   unfold-branch  expand the whole subtree
  *   toggle-fold    fold-branch or unfold-branch, whichever the item isn't
+ *   delete-item    delete the item and its subitems, cursor to the line above
  *   indent-item    indent the item AND its subitems one level
  *   outdent-item   outdent the item AND its subitems one level
  *
@@ -66,6 +67,10 @@ try {
 }
 
 const DEFAULT_SETTINGS = {
+	// "auto" matches whatever each file already uses; "tabs"/"spaces"
+	// override it. Auto is the default: silently converting someone's
+	// space-indented note to tabs on a single Tab press is not a fix.
+	indentStyle: "auto",
 	tabIndents: true,
 	relocateOnOutdent: false,
 	preserveFolds: true,
@@ -74,6 +79,29 @@ const DEFAULT_SETTINGS = {
 	smartBackspace: true,
 	arrowStepsOverFolds: true,
 	snapCursorPastMarker: true,
+	// Cosmetics. Off by default: an enabled plugin should not restyle
+	// someone's notes until they ask it to.
+	biggerCollapsedBullets: false,
+	bulletSpacing: false,
+	// Tasks-plugin integration. Off by default: it watches document edits,
+	// which nobody should opt into without being asked.
+	autoNestRecurring: false,
+};
+
+/* Optional cosmetics live in styles.css, which Obsidian injects for as long as
+ * the plugin is enabled — there is no API to load it conditionally. So every
+ * rule there is scoped to one of these body classes, and main.js adds the class
+ * only while the matching setting is on. Setting name → class name. */
+/* Shown in settings and as a notice: the one configuration in which
+ * auto-nesting cannot work, stated plainly instead of failing silently. */
+const TASKS_BELOW_WARNING =
+	"Obdina: the Tasks plugin setting “Next recurrence appears on the line below” is ON. " +
+	"Nesting expects the new instance ABOVE the completed line, so it will not do anything. " +
+	"Turn that Tasks setting off to use this.";
+
+const BODY_CLASSES = {
+	biggerCollapsedBullets: "obdina-big-collapsed-bullets",
+	bulletSpacing: "obdina-bullet-spacing",
 };
 
 const LIST_RE = /^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+/;
@@ -82,6 +110,25 @@ const LIST_RE = /^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+/;
 const ITEM_PARTS_RE = /^([ \t]*)([-*+]|\d+[.)])([ \t]+)(\[[^\]]?\][ \t]+)?/;
 const HEADING_RE = /^(#{1,6})[ \t]+/;
 const FENCE_RE = /^[ \t]*(`{3,}|~{3,})/;
+
+/* A task line: indent, marker, status character, and everything after it.
+ * status " " is open; anything else (x, X, /, -, …) counts as closed, matching
+ * how the Tasks plugin treats custom statuses. */
+const TASK_RE = /^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+\[(.)\][ \t]+(.*)$/;
+
+/* Recurrence, in either notation the Tasks plugin accepts. */
+const REPEAT_RE = /\[repeat::|\[recurrence::|\u{1F501}/iu;
+
+/* A task's identity with its inline fields removed, so two instances of the
+ * same recurring task compare equal even though their dates differ.
+ * `[[wikilinks]]` survive: they have no "::" in them. */
+function taskSignature(rest) {
+	return rest
+		.replace(/\[[^\]]*::[^\]]*\]/g, " ")
+		.replace(/[\u{1F4C5}\u{23F3}\u{1F6EB}\u{2705}\u{1F501}\u{23EB}\u{1F53C}\u{1F53D}]\s*\d{4}-\d{2}-\d{2}/gu, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
 
 /* ── whitespace primitives ───────────────────────────────────────────── */
 
@@ -262,6 +309,21 @@ function firstChildColumn(lines, fenced, line, col, tabWidth) {
 	return -1;
 }
 
+/* The column an item lands on when indented under its previous sibling, or -1
+ * if it hasn't got one. Landing on the sibling's *existing* children rather
+ * than always adding one unit is what stops an item nesting a level too deep.
+ *
+ * Shared by Tab, the solo-indent command and auto-nesting, so all three agree
+ * on where "one level in" actually is. */
+function indentTargetColumn(lines, fenced, line, tabWidth, unit) {
+	const col = indentColumns(lines[line], tabWidth);
+	const prev = prevSiblingLine(lines, fenced, line, col, tabWidth);
+	if (prev < 0) return -1;
+	const prevCol = indentColumns(lines[prev], tabWidth);
+	const childCol = firstChildColumn(lines, fenced, prev, prevCol, tabWidth);
+	return childCol >= 0 ? childCol : prevCol + unit;
+}
+
 function collectFolds(lines, fenced, from, to, tabWidth) {
 	const folds = [];
 	for (let i = from; i <= to; i++) {
@@ -439,6 +501,7 @@ class ObdinaPlugin extends Plugin {
 	async onload() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 		this.addSettingTab(new ObdinaSettingTab(this.app, this));
+		this.applyBodyClasses();
 
 		// The keymap reads this.settings at call time rather than being
 		// registered conditionally, so toggling the setting takes effect
@@ -459,7 +522,7 @@ class ObdinaPlugin extends Plugin {
 		}
 
 		if (cmEditorView && cmEditorSelection) {
-			this.registerEditorExtension(cmEditorView.updateListener.of((u) => this.onSelectionUpdate(u)));
+			this.registerEditorExtension(cmEditorView.updateListener.of((u) => this.onEditorUpdate(u)));
 		}
 
 		this.addCommand({
@@ -493,9 +556,19 @@ class ObdinaPlugin extends Plugin {
 			editorCallback: (editor) => this.runIndent(editor, "indent"),
 		});
 		this.addCommand({
+			id: "indent-item-solo",
+			name: "Indent item, leave subitems behind",
+			editorCallback: (editor) => this.runIndent(editor, "indent", false, true),
+		});
+		this.addCommand({
 			id: "outdent-item",
 			name: "Outdent item and subitems",
 			editorCallback: (editor) => this.runIndent(editor, "outdent"),
+		});
+		this.addCommand({
+			id: "delete-item",
+			name: "Delete item and subitems (cursor to end of previous line)",
+			editorCallback: (editor, ctx) => this.runDelete(editor, ctx),
 		});
 		this.addCommand({
 			id: "move-item-up",
@@ -509,8 +582,30 @@ class ObdinaPlugin extends Plugin {
 		});
 	}
 
+	/* Obsidian removes styles.css by itself on disable/uninstall, but nothing
+	 * removes a class we put on <body>. Without this, turning the plugin off
+	 * would leave the cosmetics applied until the next reload. */
+	onunload() {
+		for (const cls of Object.values(BODY_CLASSES)) document.body.classList.remove(cls);
+	}
+
+	/* Single source of truth for the cosmetic classes: called on load and after
+	 * every settings change, so a toggle takes effect immediately rather than
+	 * needing a reload. classList over Obsidian's addClass/removeClass helpers
+	 * — plain DOM has no version risk. */
+	applyBodyClasses() {
+		try {
+			for (const [setting, cls] of Object.entries(BODY_CLASSES)) {
+				document.body.classList.toggle(cls, !!this.settings[setting]);
+			}
+		} catch (e) {
+			/* cosmetics are never worth breaking load over */
+		}
+	}
+
 	async saveSettings() {
 		await this.saveData(this.settings);
+		this.applyBodyClasses();
 	}
 
 	/*
@@ -524,7 +619,9 @@ class ObdinaPlugin extends Plugin {
 	 * from inside one. The deferral also coalesces the burst of selection
 	 * events a mouse drag produces.
 	 */
-	onSelectionUpdate(update) {
+	onEditorUpdate(update) {
+		this.maybeAutoNest(update);
+
 		// Consumed whether or not it applies, so a press that lands somewhere
 		// harmless can't leave the flag set for a later click to trip over.
 		if (this._snapMarkerArmed) {
@@ -535,6 +632,7 @@ class ObdinaPlugin extends Plugin {
 		if (!this.settings.snapSelection) return;
 		if (!update.selectionSet || update.docChanged) return;
 		if (this._snapPending) return;
+		if (this.snapWouldFightUser(update)) return;
 
 		const view = update.view;
 		this._snapPending = true;
@@ -552,6 +650,33 @@ class ObdinaPlugin extends Plugin {
 	/* Returns a corrected EditorSelection, or null when nothing needs changing.
 	 * Snapping is idempotent — re-snapping an already-snapped selection returns
 	 * null — which is what stops dispatch from looping. */
+/* Snapping only ever grows a selection — it pushes the end out to
+	 * docSubtreeEnd(). That is fine for a drag, but it structurally cannot lose
+	 * an argument with Shift+Up: the keypress pulls the head off the last item,
+	 * the snap immediately puts it back, and the head oscillates between two
+	 * lines forever.
+	 *
+	 * So: when the selection SHRANK and the change did not come from the mouse,
+	 * leave it alone. Shift+Arrow then adjusts line by line the way it does
+	 * everywhere else in Obsidian, while dragging (userEvent "select.pointer",
+	 * which CodeMirror tags every mouse selection with) still snaps in both
+	 * directions. Growing a selection with the keyboard still snaps too. */
+	snapWouldFightUser(update) {
+		try {
+			if (!update.startState) return false;
+			const before = update.startState.selection.main;
+			const after = update.state.selection.main;
+			const shrank = Math.abs(after.head - after.anchor) < Math.abs(before.head - before.anchor);
+			if (!shrank) return false;
+			for (const tr of update.transactions || []) {
+				if (typeof tr.isUserEvent === "function" && tr.isUserEvent("select.pointer")) return false;
+			}
+			return true;
+		} catch (e) {
+			return false; // can't tell — behave as before
+		}
+	}
+
 	snapSelection(state) {
 		const doc = state.doc;
 		const tabWidth = this.tabWidth();
@@ -585,6 +710,118 @@ class ObdinaPlugin extends Plugin {
 
 		if (!changed) return null;
 		return cmEditorSelection.create(ranges, state.selection.mainIndex);
+	}
+
+	/* ── Auto-nest completed recurring tasks ────────────────────────────
+	 * Completing a recurring task in the Tasks plugin marks the line done and
+	 * inserts the next instance. With `recurrenceOnNextLine` off (the default)
+	 * the new instance goes directly ABOVE, leaving two siblings:
+	 *
+	 *     - [ ] pay bill  [repeat:: every month]  [due:: 2026-10-25]
+	 *     - [x] pay bill  [repeat:: every month]  [due:: 2026-09-25]  [completion:: …]
+	 *
+	 * This indents the completed line — and ONLY that line, never its subitems.
+	 * Any history it already carries keeps its column and so becomes a sibling
+	 * of the line that just moved. The whole run therefore stays flat under the
+	 * live task instead of nesting a level deeper every single month, which is
+	 * what a plain indent would do.
+	 *
+	 * Deliberately conservative: it fires only when every one of these holds,
+	 * which is the shape the Tasks plugin produces and hand-editing essentially
+	 * never is.
+	 *   - the edited line is a CLOSED task carrying a repeat field
+	 *   - the line directly above is an OPEN task at the same indent column
+	 *   - both reduce to the same text once inline fields and dates are stripped
+	 * Undo and redo are excluded outright, or it would silently re-apply itself
+	 * while you were trying to take it back. */
+	maybeAutoNest(update) {
+		if (!this.settings.autoNestRecurring) return;
+		if (!update.docChanged || this._autoNestBusy) return;
+
+		try {
+			for (const tr of update.transactions || []) {
+				if (typeof tr.isUserEvent === "function" && (tr.isUserEvent("undo") || tr.isUserEvent("redo"))) return;
+			}
+
+			const doc = update.state.doc;
+			const touched = new Set();
+			update.changes.iterChangedRanges((fromA, toA, fromB, toB) => {
+				const a = doc.lineAt(Math.max(0, Math.min(fromB, doc.length))).number;
+				const b = doc.lineAt(Math.max(0, Math.min(toB, doc.length))).number;
+				for (let n = a; n <= b; n++) touched.add(n);
+			});
+			if (!touched.size) return;
+
+			const tabWidth = this.tabWidth();
+			let hit = -1;
+
+			// Cheap per-line checks first: two doc.line() reads and two regexes,
+			// so an ordinary keystroke costs almost nothing.
+			for (const n of touched) {
+				if (n <= 1 || n > doc.lines) continue;
+				const closed = TASK_RE.exec(doc.line(n).text);
+				if (!closed || closed[2] === " ") continue; // still open
+				if (!REPEAT_RE.test(closed[3])) continue; // not recurring
+				const open = TASK_RE.exec(doc.line(n - 1).text);
+				if (!open || open[2] !== " ") continue; // no fresh instance above
+				if (columnsOf(closed[1], tabWidth) !== columnsOf(open[1], tabWidth)) continue;
+				if (taskSignature(closed[3]) !== taskSignature(open[3])) continue; // different task
+				hit = n;
+				break;
+			}
+			if (hit < 0) return;
+
+			// Only now is the whole-document work worth doing.
+			const fenced = this.fencedFor(update.state);
+			if (fenced[hit - 1]) return; // inside a code fence
+			const lines = doc.toString().split("\n");
+			const style = this.indentStyleFor(lines, fenced, tabWidth);
+			const target = indentTargetColumn(lines, fenced, hit - 1, tabWidth, style.unit);
+			if (target <= indentColumns(lines[hit - 1], tabWidth)) return;
+
+			const indent = makeIndent(target - indentColumns(lines[hit - 1], tabWidth), style.useTabs, tabWidth);
+			const at = doc.line(hit).from;
+
+			/* Was the task collapsed when it was completed? A fold is a replace
+			 * decoration over a CHARACTER RANGE — it knows nothing about parent
+			 * and child. Once the completed item's children become its siblings
+			 * the decoration carries on hiding exactly the same lines, leaving a
+			 * collapsed marker on a line that no longer has anything inside it.
+			 *
+			 * The line numbers below stay valid after the edit because inserting
+			 * indentation adds no lines. */
+			const doneIdx = hit - 1; // 0-based
+			const openIdx = hit - 2; // the fresh instance, about to become parent
+			const foldsBefore = this.foldLinesFromState(update.state);
+			const foldEnd = foldEndAt(foldsBefore, doneIdx);
+
+			/* A pure insertion at the start of the line. Nothing is replaced, so
+			 * fold decorations survive untouched and the cursor — which sits
+			 * further along the line — is pushed right by CodeMirror's own
+			 * mapping, keeping it on the same text.
+			 *
+			 * Deferred for the usual reason: dispatching synchronously from
+			 * inside an update throws. _autoNestBusy stops the resulting change
+			 * from re-entering this handler. */
+			this._autoNestBusy = true;
+			Promise.resolve().then(() => {
+				try {
+					if (update.view.state.doc === doc) {
+						update.view.dispatch({ changes: { from: at, insert: indent } });
+						// Hand the fold up to the item that now owns the run, so a
+						// task collapsed before completing is still one collapsed
+						// row afterwards rather than two.
+						if (foldEnd > doneIdx) this.moveFold(update.view, foldsBefore, doneIdx, openIdx, foldEnd);
+					}
+				} catch (e) {
+					/* never let this break an edit */
+				} finally {
+					this._autoNestBusy = false;
+				}
+			});
+		} catch (e) {
+			this._autoNestBusy = false;
+		}
 	}
 
 	/*
@@ -694,7 +931,9 @@ class ObdinaPlugin extends Plugin {
 		const info = sub.getFoldInfo();
 		const folds = info && Array.isArray(info.folds) ? info.folds.map((f) => ({ from: f.from, to: f.to })) : [];
 		if (!folds.length) return null;
-		return { sub, folds };
+		// The editor rides along so restoreFolds() can anchor the scroll
+		// position; it has no other way to reach it.
+		return { sub, folds, editor: view.editor };
 	}
 
 	/*
@@ -717,9 +956,31 @@ class ObdinaPlugin extends Plugin {
 			byStart.set(from, { from, to });
 		}
 		const folds = Array.from(byStart.values()).sort((a, b) => a.from - b.from);
+		const info = { folds, lines: lineCount };
+
+		/* Route through applyPreservingScroll() rather than calling
+		 * applyFoldInfo() directly. Rebuilding the fold set forces a CodeMirror
+		 * re-measure and changes total document height, so the scroller ends up
+		 * pointing at different content — the note visibly jumps on every Tab /
+		 * Shift-Tab / move in a document that has any folds in it.
+		 *
+		 * runFold() has always done this; the editing commands were the ones
+		 * left calling applyFoldInfo() raw.
+		 *
+		 * Anchor on the cursor: whatever the user is actually working on stays
+		 * fixed relative to the viewport. spanStart is the fallback for a
+		 * cursor we can't read. */
+		let anchor = spanStart;
+		try {
+			const c = cap.editor && cap.editor.getCursor();
+			if (c && typeof c.line === "number") anchor = c.line;
+		} catch (e) {
+			/* fall back to the edited span */
+		}
+
 		// Apply immediately to avoid a visible flash, then again once the
 		// document change has settled and CodeMirror has re-measured.
-		const apply = () => cap.sub.applyFoldInfo({ folds, lines: lineCount });
+		const apply = () => this.applyPreservingScroll(cap.editor, cap.sub, info, anchor);
 		apply();
 		requestAnimationFrame(apply);
 	}
@@ -897,6 +1158,55 @@ class ObdinaPlugin extends Plugin {
 		return [];
 	}
 
+	/* Re-home a fold from `fromLine` to `toLine`, keeping its end. Used after
+	 * auto-nesting: the completed task stops owning the history, the new
+	 * instance above it starts, and the collapsed row should follow the content
+	 * rather than the line it happened to be attached to.
+	 *
+	 * Folds nested *inside* the run are kept — they are hidden either way, and
+	 * dropping them would quietly flatten the history's own structure. */
+	moveFold(cmView, folds, fromLine, toLine, foldEnd) {
+		try {
+			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+			const sub = view && view.currentMode;
+			const editor = view && view.editor;
+			if (!sub || typeof sub.applyFoldInfo !== "function" || !editor) return;
+			// Only touch the editor this update actually came from.
+			if (editor.cm && cmView && editor.cm !== cmView) return;
+
+			const next = folds
+				.filter((f) => f.from !== fromLine)
+				.concat([{ from: toLine, to: foldEnd }])
+				.sort((a, b) => a.from - b.from);
+			const info = { folds: next, lines: cmView.state.doc.lines };
+			const apply = () => this.applyPreservingScroll(editor, sub, info, toLine);
+			apply();
+			requestAnimationFrame(apply);
+		} catch (e) {
+			/* a lost fold beats a broken edit */
+		}
+	}
+
+	/* Fold set for a given state, as 0-based {from, to} line numbers. The
+	 * editor-based foldLines() reads view.state; this takes the state directly
+	 * so it can be called from an update listener, where the state in hand is
+	 * the one the change produced. */
+	foldLinesFromState(state) {
+		if (!cmFoldedRanges || !state) return [];
+		try {
+			const doc = state.doc;
+			const out = [];
+			const iter = cmFoldedRanges(state).iter();
+			while (iter.value) {
+				out.push({ from: doc.lineAt(iter.from).number - 1, to: doc.lineAt(iter.to).number - 1 });
+				iter.next();
+			}
+			return out;
+		} catch (e) {
+			return [];
+		}
+	}
+
 	/* ── Down / Up across folded items ──────────────────────────────────
 	 * CodeMirror moves the cursor vertically by *geometry*: coordsAtPos on the
 	 * current position, add a line height to y, then posAtCoords to see what's
@@ -920,10 +1230,17 @@ class ObdinaPlugin extends Plugin {
 		 *
 		 * CodeMirror matches modifiers exactly, so these bindings never fire for
 		 * Shift+Up/Down. Selection extension is therefore untouched for free. */
-		const suggesting = this.isSuggestOpen();
-		if (this.settings.snapCursorPastMarker && !suggesting) this._snapMarkerArmed = true;
+		const wantSnap = this.settings.snapCursorPastMarker;
+		const wantFoldSteps = this.settings.arrowStepsOverFolds;
+		// Both off: release the key before doing any work at all. isSuggestOpen()
+		// can fall through to a DOM query, and paying for one on every Up/Down
+		// press to reach two disabled features is not acceptable.
+		if (!wantSnap && !wantFoldSteps) return false;
 
-		if (!this.settings.arrowStepsOverFolds) return false;
+		const suggesting = this.isSuggestOpen();
+		if (wantSnap && !suggesting) this._snapMarkerArmed = true;
+
+		if (!wantFoldSteps) return false;
 		if (suggesting) return false;
 
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -1302,6 +1619,26 @@ class ObdinaPlugin extends Plugin {
 			"merged line " + cur.line + " into the " + (covering >= 0 ? "folded" : "visible") + " item on line " + top
 		);
 	}
+	/* The style to WRITE indentation in. Every command goes through here, so
+	 * the preference is honoured in exactly one place.
+	 *
+	 * "auto" reads the file, which is what keeps a space-indented note
+	 * space-indented and a tab note on tabs. The forced modes ignore the file
+	 * entirely and normalise as you edit.
+	 *
+	 * The unit is clamped in auto mode. detectIndentStyle() reports the
+	 * shallowest non-zero column in the document, and a stray one-space list
+	 * item makes that 1 — after which Tab indents by a single space and the
+	 * outline is unreadable. A real 2-space document is left alone; 1 never is,
+	 * because nobody indents by one column on purpose. */
+	indentStyleFor(lines, fenced, tabWidth) {
+		const pref = this.settings.indentStyle;
+		if (pref === "tabs") return { useTabs: true, unit: tabWidth };
+		if (pref === "spaces") return { useTabs: false, unit: tabWidth };
+		const style = detectIndentStyle(lines, fenced, tabWidth, this.usesTabs());
+		return { useTabs: style.useTabs, unit: style.unit >= 2 ? style.unit : tabWidth };
+	}
+
 	tabWidth() {
 		try {
 			const n = this.app.vault.getConfig("tabSize");
@@ -1310,6 +1647,31 @@ class ObdinaPlugin extends Plugin {
 			/* getConfig is undocumented; fall through to the default */
 		}
 		return 4;
+	}
+
+	/* Where does the Tasks plugin put the next instance of a recurring task?
+	 * `false` (its default) means directly ABOVE the completed line, which is
+	 * the layout maybeAutoNest() looks for. `true` means below, and the whole
+	 * feature then silently does nothing — the line above a freshly completed
+	 * task is the previous month's *closed* instance, so no guard ever matches.
+	 * Safe, but invisible, hence the warning in settings.
+	 *
+	 * Reads Tasks' data.json rather than app.plugins.plugins[...]: the on-disk
+	 * format is stable and public, the internal object shape is neither.
+	 * Returns null when it can't be determined — Tasks absent, never
+	 * configured, unreadable. */
+	async tasksRecurrenceOnNextLine() {
+		try {
+			const dir = this.app.vault.configDir || ".obsidian";
+			const path = dir + "/plugins/obsidian-tasks-plugin/data.json";
+			const adapter = this.app.vault.adapter;
+			if (!adapter || typeof adapter.read !== "function") return null;
+			if (typeof adapter.exists === "function" && !(await adapter.exists(path))) return null;
+			const v = JSON.parse(await adapter.read(path)).recurrenceOnNextLine;
+			return typeof v === "boolean" ? v : null;
+		} catch (e) {
+			return null; // undocumented territory — never break settings over it
+		}
 	}
 
 	usesTabs() {
@@ -1328,11 +1690,14 @@ class ObdinaPlugin extends Plugin {
 	 * With a multi-line selection, every top-level item in the selection is
 	 * shifted (descendants are skipped — they ride along with their parent
 	 * rather than being shifted twice). */
-	runIndent(editor, direction, quiet) {
+	/* `solo` indents the item WITHOUT its subitems. The children keep their
+	 * columns, which promotes them to siblings of the item that just moved —
+	 * the operation behind auto-nesting, and useful on its own. */
+	runIndent(editor, direction, quiet, solo) {
 		const lines = editor.getValue().split("\n");
 		const fenced = computeFenced(lines);
 		const tabWidth = this.tabWidth();
-		const style = detectIndentStyle(lines, fenced, tabWidth, this.usesTabs());
+		const style = this.indentStyleFor(lines, fenced, tabWidth);
 
 		const sels = editor.listSelections();
 		let selFrom = Infinity;
@@ -1355,7 +1720,7 @@ class ObdinaPlugin extends Plugin {
 			if (fenced[i] || isBlank(lines[i]) || !LIST_RE.test(lines[i])) continue;
 			const last = roots.length ? roots[roots.length - 1] : null;
 			if (last && i <= last.end) continue;
-			roots.push({ start: i, end: listBranchEnd(lines, i, tabWidth) });
+			roots.push({ start: i, end: solo ? i : listBranchEnd(lines, i, tabWidth) });
 		}
 		if (!roots.length) {
 			// enclosingItem(), not findListRoot(): the cursor must be ON an item or
@@ -1366,14 +1731,14 @@ class ObdinaPlugin extends Plugin {
 				if (!quiet) new Notice("Obdina: no list item at the cursor.");
 				return false;
 			}
-			roots.push({ start: r, end: listBranchEnd(lines, r, tabWidth) });
+			roots.push({ start: r, end: solo ? r : listBranchEnd(lines, r, tabWidth) });
 		}
 
 		// Dynalist-style outdent physically relocates the subtree below its old
 		// parent instead of dedenting where it sits. Only meaningful for a
 		// single root — with a multi-item selection the destination is
 		// ambiguous, so those fall through to the in-place path below.
-		if (direction === "outdent" && this.settings.relocateOnOutdent && roots.length === 1) {
+		if (direction === "outdent" && this.settings.relocateOnOutdent && roots.length === 1 && !solo) {
 			const moved = this.tryRelocateOutdent(editor, lines, fenced, tabWidth, roots[0], sels);
 			if (moved !== null) return moved;
 		}
@@ -1386,18 +1751,14 @@ class ObdinaPlugin extends Plugin {
 			let target;
 
 			if (direction === "indent") {
-				const prev = prevSiblingLine(lines, fenced, r.start, col, tabWidth);
-				if (prev < 0) {
+				target = indentTargetColumn(lines, fenced, r.start, tabWidth, style.unit);
+				if (target < 0) {
 					// Dynalist parity: the first child of a parent can't indent
 					// further. Consume the key anyway so Tab doesn't fall through
 					// and inject literal whitespace into the outline.
 					if (!quiet) new Notice("Obdina: can't indent — no previous sibling to nest under.");
 					return true;
 				}
-				// Land exactly on the previous sibling's existing children, so we
-				// become their sibling rather than nesting a level too deep.
-				const childCol = firstChildColumn(lines, fenced, prev, indentColumns(lines[prev], tabWidth), tabWidth);
-				target = childCol >= 0 ? childCol : indentColumns(lines[prev], tabWidth) + style.unit;
 			} else {
 				if (col === 0) {
 					if (!quiet) new Notice("Obdina: already at the top level.");
@@ -1604,6 +1965,99 @@ class ObdinaPlugin extends Plugin {
 		return true;
 	}
 
+	/* ── Delete item ────────────────────────────────────────────────────
+	 * Deletes the item at the cursor together with its subitems, and leaves the
+	 * cursor at the END of the previous line — the outliner convention, and the
+	 * thing core's delete-paragraph doesn't do.
+	 *
+	 * Core's `editor:delete-paragraph` is `exec("deleteLine")`, whose cursor
+	 * placement is `view.moveVertically(range, true)` — it moves DOWN a line and
+	 * maps that through the deletion, so you land on the following line. It is
+	 * also *geometric*, which makes it unreliable next to a collapsed row. This
+	 * works from the fold set instead, so it is correct around folds.
+	 *
+	 * On a line that isn't a list item it deletes just that line, so it can be
+	 * bound over delete-paragraph without losing anything in ordinary prose. */
+	runDelete(editor, ctx) {
+		const view = ctx instanceof MarkdownView ? ctx : this.app.workspace.getActiveViewOfType(MarkdownView);
+		const sub = view && view.currentMode;
+
+		const lines = editor.getValue().split("\n");
+		if (!lines.length) return;
+		const fenced = computeFenced(lines);
+		const tabWidth = this.tabWidth();
+		const folds = this.foldLines(editor, sub);
+		const lastLine = lines.length - 1;
+
+		// Fifth place needing this: a cursor parked past a fold marker sits on a
+		// HIDDEN line, and deleting the branch found from there would remove
+		// something the user cannot see.
+		const cur = editor.getCursor();
+		const covering = foldStartCovering(folds, cur.line);
+		const cursorLine = Math.min(covering >= 0 ? covering : cur.line, lastLine);
+
+		let start = cursorLine;
+		let end = cursorLine;
+		const root = fenced[cursorLine] ? -1 : enclosingItem(lines, fenced, cursorLine, tabWidth);
+		if (root >= 0) {
+			start = root;
+			// Whichever reaches further: the real subtree or a fold that has been
+			// dragged past it. They normally agree; a partially folded branch
+			// would otherwise leave hidden orphans behind.
+			end = Math.max(listBranchEnd(lines, root, tabWidth), foldEndAt(folds, root));
+		}
+		end = Math.min(Math.max(end, start), lastLine);
+
+		/* Take the preceding newline with the span so no blank line is left
+		 * behind. At the top of the document there isn't one, so take the
+		 * following newline instead — unless the whole document is going. */
+		let from;
+		let to;
+		if (start > 0) {
+			from = { line: start - 1, ch: lines[start - 1].length };
+			to = { line: end, ch: lines[end].length };
+		} else {
+			from = { line: 0, ch: 0 };
+			to = end < lastLine ? { line: end + 1, ch: 0 } : { line: end, ch: lines[end].length };
+		}
+
+		/* Where the cursor lands. If the line above is hidden inside a fold, the
+		 * end of the *collapsed item that owns it* is what the user actually
+		 * sees as "the end of the previous line" — putting the cursor on the
+		 * hidden line itself would be invisible. */
+		let caret = { line: 0, ch: 0 };
+		if (start > 0) {
+			const above = start - 1;
+			const top = foldStartCovering(folds, above);
+			const line = top >= 0 ? top : above;
+			caret = { line, ch: lines[line].length };
+		}
+
+		// One replaceRange = one undo step.
+		editor.replaceRange("", from, to);
+		editor.setCursor(caret);
+
+		/* Line count drops, so this needs its own remap rather than
+		 * restoreFolds(). A fold whose START is inside the deleted span goes
+		 * with it; one that merely ends inside is truncated to just above the
+		 * span; anything below slides up. */
+		if (this.settings.preserveFolds && folds.length && sub && typeof sub.applyFoldInfo === "function") {
+			const removed = end - start + 1;
+			const remapped = [];
+			for (const f of folds) {
+				if (f.from >= start && f.from <= end) continue; // its owner is gone
+				const nf = f.from > end ? f.from - removed : f.from;
+				const nt = f.to > end ? f.to - removed : f.to >= start ? start - 1 : f.to;
+				if (nt > nf) remapped.push({ from: nf, to: nt });
+			}
+			remapped.sort((a, b) => a.from - b.from);
+			const info = { folds: remapped, lines: lines.length - removed };
+			const apply = () => this.applyPreservingScroll(editor, sub, info, caret.line);
+			apply();
+			requestAnimationFrame(apply);
+		}
+	}
+
 	/* ── folding ────────────────────────────────────────────────────────── */
 
 	runFold(editor, ctx, mode, includeRoot) {
@@ -1719,6 +2173,26 @@ class ObdinaSettingTab extends PluginSettingTab {
 	display() {
 		const { containerEl } = this;
 		containerEl.empty();
+
+		new Setting(containerEl).setName("Outlining Behavior").setHeading();
+
+		new Setting(containerEl)
+			.setName("Indent with")
+			.setDesc(
+				"What to write when indenting. \u201cMatch each file\u201d keeps a space-indented note on spaces and a tab-indented note on tabs, so nothing is silently converted \u2014 " +
+					"but a file that mixes both is decided by whichever is in the majority, which can flip as you edit. Forcing tabs or spaces makes it predictable and normalises files as you go."
+			)
+			.addDropdown((d) =>
+				d
+					.addOption("auto", "Match each file")
+					.addOption("tabs", "Always tabs")
+					.addOption("spaces", "Always spaces")
+					.setValue(this.plugin.settings.indentStyle)
+					.onChange(async (v) => {
+						this.plugin.settings.indentStyle = v;
+						await this.plugin.saveSettings();
+					})
+			);
 
 		new Setting(containerEl)
 			.setName("Tab / Shift-Tab indent list items")
@@ -1847,6 +2321,70 @@ class ObdinaSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				})
 			);
+
+		new Setting(containerEl).setName("List Visual Tweaks").setHeading();
+
+		new Setting(containerEl)
+			.setName("Make collapsed bullets larger")
+			.setDesc(
+				"Enlarge the bullet of a collapsed item so it reads as \u201cthere is more inside\u201d at a glance. " +
+					"Obsidian already recolors collapsed bullets; this adds size to that signal, which matters most if you hide the \u201c\u2026\u201d fold marker. " +
+					"Retune it from a snippet with --obdina-collapsed-bullet-size."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.biggerCollapsedBullets).onChange(async (v) => {
+					this.plugin.settings.biggerCollapsedBullets = v;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Add space between bullet and text")
+			.setDesc(
+				"Obsidian has no setting for this gap \u2014 it is just the literal space after the \u201c-\u201d in your note. " +
+					"Adds a small visual margin instead, without touching the text. Checkboxes get a matching nudge. " +
+					"Retune with --obdina-bullet-gap / --obdina-checkbox-gap."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.bulletSpacing).onChange(async (v) => {
+					this.plugin.settings.bulletSpacing = v;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl).setName("Task Integration").setHeading();
+
+		const autoNest = new Setting(containerEl)
+			.setName("Nest completed recurring tasks under the new one")
+			.setDesc(
+				"When the Tasks plugin completes a recurring task, it adds the next instance on the line above and leaves the completed one as its sibling. " +
+					"This indents the completed line — and only that line, so earlier history stays flat rather than nesting deeper each time — turning the live task into a foldable log of itself. " +
+					"Requires the Tasks plugin, and only fires when the line above is an open instance of the same task."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.autoNestRecurring).onChange(async (v) => {
+					this.plugin.settings.autoNestRecurring = v;
+					await this.plugin.saveSettings();
+					// Turning it on while Tasks is configured the other way would
+					// otherwise look like the feature is simply broken.
+					if (v && (await this.plugin.tasksRecurrenceOnNextLine()) === true) {
+						new Notice(TASKS_BELOW_WARNING, 12000);
+					}
+				})
+			);
+
+		/* Async, so the row renders immediately and the warning appears a tick
+		 * later if it applies. Only shown for an explicit `true` — a null
+		 * (Tasks not installed, or never configured) says nothing either way,
+		 * and a settings pane is no place to guess. */
+		this.plugin.tasksRecurrenceOnNextLine().then((below) => {
+			if (below !== true) return;
+			try {
+				autoNest.descEl.createEl("div", { text: TASKS_BELOW_WARNING, cls: "mod-warning" });
+			} catch (e) {
+				/* cosmetic only */
+			}
+		});
 	}
 }
 

@@ -1,0 +1,78 @@
+/*
+ * Copyright 2026 chanon
+ * Licensed under the Apache License, Version 2.0. See LICENSE.
+ *
+ * Obdina — optional outline cosmetics.
+ *
+ * Obsidian injects this file whenever the plugin is enabled; there is no API to
+ * load it conditionally. So EVERY rule here is scoped to a body class that
+ * main.js adds only while the matching setting is on. With both settings off
+ * this file changes nothing, which keeps "enabled" and "restyles your notes"
+ * separate decisions.
+ *
+ * Both blocks are also driven by CSS variables rather than literals, so a theme
+ * or a user snippet can retune them without disabling the feature outright.
+ */
+
+/* ── Bigger collapsed bullets ────────────────────────────────────────────
+ * Obsidian draws each bullet as an absolutely-positioned ::after on a
+ * .list-bullet span, sized by --list-bullet-size (default 0.3em). Core already
+ * recolors collapsed bullets via --list-marker-color-collapsed; this adds size
+ * to that signal, which matters most when the fold placeholder ("…") is hidden
+ * and the bullet is the only inline cue that an item is collapsed.
+ *
+ * Two selectors, mirroring Obsidian's own core rules:
+ *   li.is-collapsed .list-bullet::after              → reading view
+ *   .is-collapsed ~ .cm-formatting-list .list-bullet::after
+ *                                                    → live preview, where
+ *     .is-collapsed sits on the fold indicator — a *sibling* preceding the
+ *     bullet, not an ancestor. That is why the size is set directly here
+ *     instead of by overriding --list-bullet-size, which cannot inherit across
+ *     a sibling boundary.
+ *
+ * The ::after is absolutely positioned inside a centered flex parent, so it
+ * grows from its own center and the text baseline does not move. */
+
+body.obdina-big-collapsed-bullets {
+	--obdina-collapsed-bullet-size: 0.55em;
+}
+
+body.obdina-big-collapsed-bullets li.is-collapsed .list-bullet::after,
+body.obdina-big-collapsed-bullets .is-collapsed ~ .cm-formatting-list .list-bullet::after {
+	width: var(--obdina-collapsed-bullet-size);
+	height: var(--obdina-collapsed-bullet-size);
+	transition: width 100ms ease, height 100ms ease;
+}
+
+/* Fallback for native list markers, used where Obsidian has not injected a
+ * .list-bullet span. ::marker accepts only a handful of properties — font-size
+ * is the one that scales the disc. Restricted to ul so ordered-list numbers
+ * don't balloon. */
+body.obdina-big-collapsed-bullets ul > li.is-collapsed::marker {
+	font-size: var(--obdina-collapsed-marker-scale, 1.7em);
+}
+
+/* ── Breathing room between bullet and text ──────────────────────────────
+ * Obsidian has no variable for this gap. .list-bullet is an inline-flex span
+ * whose ::before is a zero-width space and whose ::after (the dot) is
+ * absolutely positioned — so the span itself is ~0 wide, and the only gap in a
+ * default install is the literal space character after the "-" in the source.
+ *
+ * margin-inline-end adds visual space without touching document text, and works
+ * in both reading view and live preview since both use .list-bullet. */
+
+body.obdina-bullet-spacing {
+	--obdina-bullet-gap: 0.22em;
+	--obdina-checkbox-gap: 0.2em;
+}
+
+body.obdina-bullet-spacing .list-bullet {
+	margin-inline-end: var(--obdina-bullet-gap);
+}
+
+/* Task lines render a checkbox instead of a bullet, so they need the matching
+ * nudge or checklists end up tighter than the plain bullets beside them.
+ * !important because themes commonly set this margin themselves. */
+body.obdina-bullet-spacing .task-list-item-checkbox {
+	margin-inline-end: var(--obdina-checkbox-gap) !important;
+}
