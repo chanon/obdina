@@ -54,6 +54,12 @@ Without it, `c` would become a child of `b`.
 Move an item up or down among its siblings, carrying its whole subtree. The
 sibling it swaps with moves as a unit too, so nothing gets stranded.
 
+**Outside a list** — prose, a blank line, a heading, inside a code block — it
+moves that single line, like Obsidian's own *Move line up/down*. So one pair of
+hotkeys works everywhere instead of doing nothing half the time. If the
+neighbour is a collapsed item, the line moves past the **whole** collapsed
+region rather than landing inside it.
+
 ### Indent without subitems
 
 `Tab` moves an item **with** its subtree. The *Indent item, leave subitems
@@ -96,6 +102,23 @@ Requires the Tasks setting **“Next recurrence appears on the line below”** t
 reads that setting and warns you in its own settings if it is on, rather than
 quietly doing nothing.
 
+### Delete joins items, not lines
+
+At the end of an item, core's forward-`Delete` joins the raw next **line** on,
+dragging its indent, bullet and checkbox into the middle of your text. Obdina
+joins the two items' **text** and nothing else, with two rules on top:
+
+- **Completion is sticky.** If either item is done, the merged item is done. An
+  open item absorbing a completed one adopts its status character, so `[/]` and
+  other custom statuses survive.
+- **The merged item takes the shallower indent.** Pulling up a subitem keeps
+  this item's level; pulling up an item from a parent or grandparent level
+  *promotes* this one out to meet it. Its own subitems stay where they are and
+  remain its subitems.
+
+"The next item" means the next *visible* one — at the end of a collapsed item
+that is the line after its whole hidden subtree, never the first hidden child.
+
 ### Delete item
 
 Deletes the item at the cursor **with its subitems**, and leaves the cursor at
@@ -132,11 +155,25 @@ child, because replacing a range of text drops CodeMirror's fold decorations.
 Obdina captures the fold set before each edit and remaps it through the same
 transformation the text got, so collapsed subtrees stay collapsed.
 
-### Enter after a folded item
+### Enter knows where the new item belongs
 
-At the end of a collapsed item, `Enter` creates the new item **after the whole
-collapsed subtree**, as its sibling — instead of inserting inside the fold,
-where it becomes a child.
+At the end of an item **with subitems**, `Enter` creates the new item as its
+**first subitem**. Obsidian inserts at the parent's own indent, directly above
+the existing subitems — and because nesting in Markdown is positional, those
+subitems silently become children of the new empty item:
+
+```
+- parent            - parent            - parent
+  - child1   core     -          Obdina   - (new)
+  - child2     →        - child1     →      - child1
+                        - child2            - child2
+```
+
+At the end of a **collapsed** item, `Enter` instead creates the new item *after
+the whole collapsed subtree*, as its sibling — rather than inside the fold,
+where it would become a child.
+
+Both have their own toggle.
 
 ### Backspace joins items, not lines
 

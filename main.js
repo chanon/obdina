@@ -76,7 +76,9 @@ const DEFAULT_SETTINGS = {
 	preserveFolds: true,
 	snapSelection: true,
 	smartEnter: true,
+	enterMakesFirstChild: true,
 	smartBackspace: true,
+	smartDelete: true,
 	arrowStepsOverFolds: true,
 	snapCursorPastMarker: true,
 	// Cosmetics. Off by default: an enabled plugin should not restyle
@@ -298,15 +300,20 @@ function parentLine(lines, fenced, from, col, tabWidth) {
 }
 
 /* Column of the first existing child of the item at `line`, or -1. */
-function firstChildColumn(lines, fenced, line, col, tabWidth) {
+function firstChildLine(lines, fenced, line, col, tabWidth) {
 	for (let i = line + 1; i < lines.length; i++) {
 		if (isBlank(lines[i])) continue;
 		const c = indentColumns(lines[i], tabWidth);
 		if (c <= col) return -1;
-		if (!fenced[i] && LIST_RE.test(lines[i])) return c;
+		if (!fenced[i] && LIST_RE.test(lines[i])) return i;
 		return -1;
 	}
 	return -1;
+}
+
+function firstChildColumn(lines, fenced, line, col, tabWidth) {
+	const i = firstChildLine(lines, fenced, line, col, tabWidth);
+	return i < 0 ? -1 : indentColumns(lines[i], tabWidth);
 }
 
 /* The column an item lands on when indented under its previous sibling, or -1
@@ -437,6 +444,17 @@ function landingColumn(toText, landed, anchored) {
 	return Math.min(toText.length, Math.max(capped, start));
 }
 
+/* An existing item's prefix reused verbatim, with a task checkbox reset to
+ * unchecked. Unlike nextItemPrefix() the ordered number is NOT incremented:
+ * this builds an item that goes *before* the one it copies, so it takes that
+ * item's number and pushes the rest down — which is also how Markdown
+ * renumbers an ordered list on render. */
+function itemPrefixOf(line) {
+	const m = ITEM_PARTS_RE.exec(line);
+	if (!m) return null;
+	return m[1] + m[2] + m[3] + (m[4] ? "[ ] " : "");
+}
+
 /* The prefix for a new sibling of `line`: same indentation and bullet, ordered
  * numbers incremented, and a task checkbox reset to unchecked — so Enter after
  * "- [x] done" gives a fresh "- [ ] ", matching Obsidian core. */
@@ -514,6 +532,7 @@ class ObdinaPlugin extends Plugin {
 						{ key: "Shift-Tab", run: () => this.handleTab("outdent") },
 						{ key: "Enter", run: () => this.handleEnter() },
 						{ key: "Backspace", run: () => this.handleBackspace() },
+						{ key: "Delete", run: () => this.handleDelete() },
 						{ key: "ArrowDown", run: () => this.handleArrow(1) },
 						{ key: "ArrowUp", run: () => this.handleArrow(-1) },
 					])
@@ -1044,6 +1063,7 @@ class ObdinaPlugin extends Plugin {
 			// all on your last Enter press, and where did it exit?
 			lastEnterPress: this._lastEnter || "handleEnter() has NEVER run — our Enter binding is not reaching the keymap",
 			lastBackspacePress: this._lastBackspace || "handleBackspace() has not run since load",
+			lastDeletePress: this._lastDelete || "handleDelete() has not run since load",
 			suggestOpenNow: (() => {
 				try {
 					return {
@@ -1343,7 +1363,8 @@ class ObdinaPlugin extends Plugin {
 		};
 		this._lastEnter = { at: new Date().toISOString(), fired: true, handled: null, reason: "started" };
 
-		if (!this.settings.smartEnter) return bail("smartEnter setting is off");
+		if (!this.settings.smartEnter && !this.settings.enterMakesFirstChild)
+			return bail("both Enter behaviours are off");
 		if (this.isSuggestOpen()) return bail("an editor suggest popup is open");
 
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -1390,14 +1411,53 @@ class ObdinaPlugin extends Plugin {
 		// An empty item means "end the list" in Obsidian; leave that to core.
 		if (!rootLine.slice(m[0].length).trim()) return bail("item is empty");
 
-		// The item must actually be collapsed — a fold has to start on it.
+		const tabWidth = this.tabWidth();
 		const foldEnd = foldEndAt(folds, root);
-		if (foldEnd < 0) return bail("no fold starts on line " + root + " (cursor line " + cur.line + ")");
+
+		/* Not collapsed, but it has children: start a new FIRST CHILD.
+		 *
+		 * Core would insert a sibling at the parent's own column, immediately
+		 * above the existing children — and because nesting in Markdown is
+		 * positional, those children silently become children of the new empty
+		 * item. Inserting at the child column is the only thing that can go in
+		 * that position without disturbing the tree.
+		 *
+		 * The prefix is copied from the existing first child, so the new item
+		 * matches its siblings' marker and depth rather than guessing. */
+		if (foldEnd < 0) {
+			if (!this.settings.enterMakesFirstChild) return bail("enterMakesFirstChild is off, and the item isn't collapsed");
+			const kid = firstChildLine(lines, fenced, root, indentColumns(rootLine, tabWidth), tabWidth);
+			if (kid < 0) return bail("item has no children and isn't collapsed");
+			const kidPrefix = itemPrefixOf(lines[kid]);
+			if (kidPrefix == null) return bail("could not build a first-child prefix");
+
+			this._lastEnter.handled = true;
+			this._lastEnter.reason = "handled — new first child under line " + root;
+
+			editor.replaceRange("\n" + kidPrefix, { line: root, ch: rootLine.length });
+			editor.setCursor({ line: root + 1, ch: kidPrefix.length });
+
+			/* One line appears after `root`. No fold starts on root (we are in
+			 * the not-collapsed branch), so nothing here can swallow the new
+			 * item; a fold that merely *contains* root grows by one to keep
+			 * containing the same content. */
+			if (this.settings.preserveFolds && sub && typeof sub.applyFoldInfo === "function" && folds.length) {
+				const shifted = folds
+					.map((f) => ({ from: f.from > root ? f.from + 1 : f.from, to: f.to > root ? f.to + 1 : f.to }))
+					.sort((a, b) => a.from - b.from);
+				const apply = () => sub.applyFoldInfo({ folds: shifted, lines: lines.length + 1 });
+				apply();
+				requestAnimationFrame(apply);
+			}
+			return true;
+		}
+
+		if (!this.settings.smartEnter) return bail("smartEnter is off");
 
 		// Insert past whichever reaches further: the collapsed range or the
 		// item's real subtree. They normally agree, but a partially-folded
 		// subtree would otherwise drop the new item in the middle of it.
-		const end = Math.max(foldEnd, listBranchEnd(lines, root, this.tabWidth()));
+		const end = Math.max(foldEnd, listBranchEnd(lines, root, tabWidth));
 		if (end <= root) return bail("no subtree beneath this item");
 
 		this._lastEnter.handled = true;
@@ -1430,6 +1490,159 @@ class ObdinaPlugin extends Plugin {
 			apply();
 			requestAnimationFrame(apply);
 		}
+		return true;
+	}
+
+	/* ── Delete at the end of an item ───────────────────────────────────
+	 * Core's forward-Delete joins the raw next LINE onto this one, so you get
+	 * its indentation, its bullet and its checkbox dragged into the middle of
+	 * your text: "- buy milk" + "\t- [x] eggs" becomes "- buy milk\t- [x] eggs".
+	 * An outliner joins the two items' TEXT and nothing else.
+	 *
+	 * Three rules, all of them Dynalist's:
+	 *
+	 * 1. Only the next item's text comes across. Indent, marker and checkbox
+	 *    are dropped.
+	 *
+	 * 2. Completion is sticky. If either item is done, the merged item is done
+	 *    — an open item absorbing a completed one adopts its status character
+	 *    (so `[/]` or any custom status survives), and a completed item
+	 *    absorbing an open one stays completed.
+	 *
+	 * 3. The merged item takes the SHALLOWER of the two indents. One rule
+	 *    covers both directions: pulling up a child keeps this item's level,
+	 *    and pulling up something at a parent or grandparent level promotes
+	 *    this item out to meet it. Its own subitems stay where they are and
+	 *    remain its subitems, since they are still deeper than it.
+	 *
+	 * "The next item" means the next VISIBLE one: at the end of a collapsed
+	 * item that is the line after its whole hidden subtree, never the first
+	 * hidden child. */
+	handleDelete() {
+		const bail = (reason, extra) => {
+			this._lastDelete = { at: new Date().toISOString(), fired: true, handled: false, reason, extra };
+			return false;
+		};
+
+		if (!this.settings.smartDelete) return bail("smartDelete setting is off");
+		if (this.isSuggestOpen()) return bail("an editor suggest popup is open");
+
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		const editor = view && view.editor;
+		const sub = view && view.currentMode;
+		if (!editor) return bail("no active markdown editor");
+
+		const sels = editor.listSelections();
+		if (sels.length !== 1) return bail("more than one selection", sels.length);
+		const sel = sels[0];
+		if (sel.anchor.line !== sel.head.line || sel.anchor.ch !== sel.head.ch)
+			return bail("selection is not empty", JSON.stringify(sel));
+		const cur = sel.head;
+
+		const lines = editor.getValue().split("\n");
+		const line = lines[cur.line];
+		if (line == null) return bail("cursor line out of range", cur.line);
+
+		const fenced = computeFenced(lines);
+		if (fenced[cur.line]) return bail("cursor is inside a code fence");
+
+		const parts = ITEM_PARTS_RE.exec(line);
+		if (!parts) return bail("line is not a list item", JSON.stringify(line));
+
+		// At the end of the text. Trailing whitespace is tolerated so a stray
+		// space doesn't silently disable this; deleting mid-text is core's job.
+		if (cur.ch < line.replace(/\s+$/, "").length)
+			return bail("cursor is not at the end of the item", "ch=" + cur.ch);
+
+		const folds = this.foldLines(editor, sub);
+		if (foldStartCovering(folds, cur.line) >= 0) return bail("cursor is parked on a hidden line", cur.line);
+
+		/* The next item the user can SEE. At the end of a collapsed item that is
+		 * the line after its whole hidden subtree — merging the first hidden
+		 * child would pull invisible text into view. */
+		const foldEnd = foldEndAt(folds, cur.line);
+		const nextIdx = (foldEnd >= 0 ? foldEnd : cur.line) + 1;
+		if (nextIdx >= lines.length) return bail("nothing below this item");
+		const nextLine = lines[nextIdx];
+		if (fenced[nextIdx]) return bail("the line below is inside a code fence");
+		if (isBlank(nextLine)) return bail("the line below is blank");
+		const nextParts = ITEM_PARTS_RE.exec(nextLine);
+		if (!nextParts) return bail("the line below is not a list item", JSON.stringify(nextLine));
+
+		const tabWidth = this.tabWidth();
+		const curCol = indentColumns(line, tabWidth);
+		const nextCol = indentColumns(nextLine, tabWidth);
+
+		// Rule 3: the shallower of the two.
+		let ws = parts[1];
+		if (nextCol < curCol) ws = stripColumns(parts[1], curCol - nextCol, tabWidth);
+
+		/* Rule 2: completion is sticky. Only meaningful when this item is a task
+		 * — absorbing a completed task should never grow a checkbox on an item
+		 * that never had one. */
+		let box = parts[4] || "";
+		if (box && nextParts[4] && box.charAt(1) === " " && nextParts[4].charAt(1) !== " ") {
+			box = nextParts[4];
+		}
+
+		// Rule 1: text only.
+		const head = ws + parts[2] + parts[3] + box;
+		const keptText = line.slice(parts[0].length).replace(/\s+$/, "");
+		const movedText = nextLine.slice(nextParts[0].length);
+		const merged = head + keptText + movedText;
+		const caret = { line: cur.line, ch: head.length + keptText.length };
+
+		if (nextIdx === cur.line + 1) {
+			// Contiguous: one replaceRange, one undo step.
+			editor.replaceRange(merged, { line: cur.line, ch: 0 }, { line: nextIdx, ch: nextLine.length });
+			editor.setCursor(caret);
+		} else {
+			/* A collapsed subtree sits between them. Rewriting that span would
+			 * churn every hidden line, so: rewrite this line, and separately
+			 * drop the next item's line with its preceding newline. Ranges are
+			 * in ORIGINAL coordinates and cannot overlap, because a fold hides
+			 * only lines strictly below its start. */
+			const changes = [
+				{ from: { line: cur.line, ch: 0 }, to: { line: cur.line, ch: line.length }, text: merged },
+				{
+					from: { line: nextIdx - 1, ch: lines[nextIdx - 1].length },
+					to: { line: nextIdx, ch: nextLine.length },
+					text: "",
+				},
+			];
+			try {
+				editor.transaction({ changes, selection: { from: caret, to: caret } });
+			} catch (e) {
+				editor.replaceRange("", { line: nextIdx - 1, ch: lines[nextIdx - 1].length }, { line: nextIdx, ch: nextLine.length });
+				editor.replaceRange(merged, { line: cur.line, ch: 0 }, { line: cur.line, ch: line.length });
+				editor.setCursor(caret);
+			}
+		}
+
+		/* One line disappears at nextIdx. A fold that STARTED there loses its
+		 * owner and goes; this item's own fold ends at nextIdx - 1 and is
+		 * untouched; anything below slides up one. */
+		if (this.settings.preserveFolds && folds.length && sub && typeof sub.applyFoldInfo === "function") {
+			const remapped = folds
+				.filter((f) => f.from !== nextIdx)
+				.map((f) => ({ from: f.from > nextIdx ? f.from - 1 : f.from, to: f.to >= nextIdx ? f.to - 1 : f.to }))
+				.filter((f) => f.to > f.from)
+				.sort((a, b) => a.from - b.from);
+			try {
+				const apply = () => sub.applyFoldInfo({ folds: remapped, lines: lines.length - 1 });
+				apply();
+				requestAnimationFrame(apply);
+			} catch (e) {
+				/* a lost fold beats a broken key */
+			}
+		}
+
+		this._lastDelete = {
+			at: new Date().toISOString(),
+			fired: true,
+			handled: true,
+			reason: "merged line " + nextIdx + " into line " + cur.line + (nextCol < curCol ? " (promoted)" : ""),
+		};
 		return true;
 	}
 
@@ -1836,42 +2049,78 @@ class ObdinaPlugin extends Plugin {
 		const sels = editor.listSelections();
 		const cursorLine = sels.length ? Math.min(sels[0].anchor.line, sels[0].head.line) : editor.getCursor().line;
 
-		const s = findListRoot(lines, fenced, cursorLine);
-		if (s < 0) {
-			new Notice("Obdina: no list item at the cursor.");
-			return;
-		}
-		const e = listBranchEnd(lines, s, tabWidth);
-		const col = indentColumns(lines[s], tabWidth);
+		const lastLine = lines.length - 1;
+		const moveView = this.app.workspace.getActiveViewOfType(MarkdownView);
+		const folds = this.foldLines(editor, moveView && moveView.currentMode);
+
+		// Sixth place needing this: a cursor parked past a fold marker sits on a
+		// hidden line, and we would move something that isn't on screen.
+		const covering = foldStartCovering(folds, cursorLine);
+		const here = Math.min(covering >= 0 ? covering : cursorLine, lastLine);
+
+		/* enclosingItem(), not findListRoot(): the latter searches UPWARD and
+		 * would happily claim the last item of a list for a paragraph written
+		 * underneath it, moving something the cursor isn't even on. */
+		const s = fenced[here] ? -1 : enclosingItem(lines, fenced, here, tabWidth);
 
 		let spanStart;
 		let spanEnd;
 		const order = [];
 
-		if (direction === "up") {
-			const ps = prevSiblingLine(lines, fenced, s, col, tabWidth);
-			if (ps < 0) {
-				new Notice("Obdina: already the first item at this level.");
-				return;
+		if (s < 0) {
+			/* Not in a list — prose, a blank line, a heading, inside a fence.
+			 * Behave like Obsidian's own swap-line: move this single line past
+			 * its neighbour.
+			 *
+			 * The neighbour is widened to its whole COLLAPSED region when it is
+			 * folded, so a line can never be dropped into the middle of a
+			 * collapsed subtree, which is both invisible and re-parents it. */
+			if (direction === "up") {
+				if (here === 0) return; // top of the document, nothing to swap with
+				const top = foldStartCovering(folds, here - 1);
+				const ns = top >= 0 ? top : here - 1;
+				spanStart = ns;
+				spanEnd = here;
+				order.push(here); // us, first
+				for (let i = ns; i <= here - 1; i++) order.push(i); // them, after
+			} else {
+				if (here === lastLine) return; // bottom of the document
+				const foldEnd = foldEndAt(folds, here + 1);
+				const ne = Math.min(Math.max(foldEnd, here + 1), lastLine);
+				spanStart = here;
+				spanEnd = ne;
+				for (let i = here + 1; i <= ne; i++) order.push(i); // them, first
+				order.push(here); // us, after
 			}
-			const prevEnd = listBranchEnd(lines, ps, tabWidth);
-			spanStart = ps;
-			spanEnd = e;
-			for (let i = s; i <= e; i++) order.push(i); // us, first
-			for (let i = prevEnd + 1; i < s; i++) order.push(i); // separator
-			for (let i = ps; i <= prevEnd; i++) order.push(i); // them, after
 		} else {
-			const ns = nextSiblingLine(lines, fenced, e + 1, col, tabWidth);
-			if (ns < 0) {
-				new Notice("Obdina: already the last item at this level.");
-				return;
+			const e = listBranchEnd(lines, s, tabWidth);
+			const col = indentColumns(lines[s], tabWidth);
+
+			if (direction === "up") {
+				const ps = prevSiblingLine(lines, fenced, s, col, tabWidth);
+				if (ps < 0) {
+					new Notice("Obdina: already the first item at this level.");
+					return;
+				}
+				const prevEnd = listBranchEnd(lines, ps, tabWidth);
+				spanStart = ps;
+				spanEnd = e;
+				for (let i = s; i <= e; i++) order.push(i); // us, first
+				for (let i = prevEnd + 1; i < s; i++) order.push(i); // separator
+				for (let i = ps; i <= prevEnd; i++) order.push(i); // them, after
+			} else {
+				const ns = nextSiblingLine(lines, fenced, e + 1, col, tabWidth);
+				if (ns < 0) {
+					new Notice("Obdina: already the last item at this level.");
+					return;
+				}
+				const nextEnd = listBranchEnd(lines, ns, tabWidth);
+				spanStart = s;
+				spanEnd = nextEnd;
+				for (let i = ns; i <= nextEnd; i++) order.push(i); // them, first
+				for (let i = e + 1; i < ns; i++) order.push(i); // separator
+				for (let i = s; i <= e; i++) order.push(i); // us, after
 			}
-			const nextEnd = listBranchEnd(lines, ns, tabWidth);
-			spanStart = s;
-			spanEnd = nextEnd;
-			for (let i = ns; i <= nextEnd; i++) order.push(i); // them, first
-			for (let i = e + 1; i < ns; i++) order.push(i); // separator
-			for (let i = s; i <= e; i++) order.push(i); // us, after
 		}
 
 		const newLineOf = new Map();
@@ -2293,6 +2542,23 @@ class ObdinaSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Enter at the end of a parent starts a new first subitem")
+			.setDesc(
+				cmKeymap
+					? "Obsidian inserts the new item at the parent's own indent, directly above its existing subitems \u2014 which silently makes those subitems belong to the new empty item instead. This creates the new item as the parent's first subitem, leaving the rest of the branch alone."
+					: "Unavailable \u2014 this Obsidian build doesn't expose CodeMirror to plugins."
+			)
+			.addToggle((t) =>
+				t
+					.setValue(this.plugin.settings.enterMakesFirstChild && !!cmKeymap)
+					.setDisabled(!cmKeymap)
+					.onChange(async (v) => {
+						this.plugin.settings.enterMakesFirstChild = v;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
 			.setName("Backspace respects structure and folds")
 			.setDesc(
 				cmKeymap
@@ -2305,6 +2571,23 @@ class ObdinaSettingTab extends PluginSettingTab {
 					.setDisabled(!cmKeymap)
 					.onChange(async (v) => {
 						this.plugin.settings.smartBackspace = v;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Delete joins the next item's text only")
+			.setDesc(
+				cmKeymap
+					? "At the end of an item, Delete merges the next item's text without dragging its indent, bullet or checkbox along. If either item is completed the merged one is completed, and pulling up an item from a shallower level promotes this one out to meet it."
+					: "Unavailable — this Obsidian build doesn't expose CodeMirror to plugins."
+			)
+			.addToggle((t) =>
+				t
+					.setValue(this.plugin.settings.smartDelete && !!cmKeymap)
+					.setDisabled(!cmKeymap)
+					.onChange(async (v) => {
+						this.plugin.settings.smartDelete = v;
 						await this.plugin.saveSettings();
 					})
 			);
