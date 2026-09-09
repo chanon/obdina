@@ -48,6 +48,9 @@ let cmPrec = null;
 let cmEditorView = null;
 let cmEditorSelection = null;
 let cmFoldedRanges = null;
+let cmDecoration = null;
+let cmStateField = null;
+let cmStateEffect = null;
 try {
 	const view = require("@codemirror/view");
 	const state = require("@codemirror/state");
@@ -55,6 +58,9 @@ try {
 	cmEditorView = view.EditorView;
 	cmPrec = state.Prec;
 	cmEditorSelection = state.EditorSelection;
+	cmDecoration = view.Decoration;
+	cmStateField = state.StateField;
+	cmStateEffect = state.StateEffect;
 } catch (e) {
 	/* CodeMirror not exposed on this build — commands still work */
 }
@@ -79,12 +85,14 @@ const DEFAULT_SETTINGS = {
 	enterMakesFirstChild: true,
 	smartBackspace: true,
 	smartDelete: true,
+	dragAndDrop: true,
 	arrowStepsOverFolds: true,
 	snapCursorPastMarker: true,
 	// Cosmetics. Off by default: an enabled plugin should not restyle
 	// someone's notes until they ask it to.
 	biggerCollapsedBullets: false,
 	bulletSpacing: false,
+	dragSourceTint: true,
 	// Tasks-plugin integration. Off by default: it watches document edits,
 	// which nobody should opt into without being asked.
 	autoNestRecurring: false,
@@ -104,7 +112,23 @@ const TASKS_BELOW_WARNING =
 const BODY_CLASSES = {
 	biggerCollapsedBullets: "obdina-big-collapsed-bullets",
 	bulletSpacing: "obdina-bullet-spacing",
+	dragSourceTint: "obdina-drag-tint",
+	/* Not a cosmetic preference — it gates the grab cursor on bullets, which
+	 * would be a lie if dragging were switched off. Riding the same mechanism
+	 * keeps every settings-driven CSS rule in one table. */
+	dragAndDrop: "obdina-drag-enabled",
 };
+
+/* Pixels the pointer must travel before a press on a bullet counts as a
+ * drag rather than a click. Small enough to feel immediate, large enough
+ * that a shaky click on a task checkbox still ticks it. */
+const DRAG_THRESHOLD = 4;
+
+/* How far into an indent unit the pointer must travel before the depth
+ * changes. Math.round() flips at the halfway point, which at a ~32px unit means
+ * a 16px twitch changes the nesting — far too eager. 0.3 means 70% of a unit
+ * must be crossed, so the depth follows deliberate movement, not jitter. */
+const DRAG_DEPTH_BIAS = 0.3;
 
 const LIST_RE = /^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+/;
 /* Same shape as LIST_RE but with the pieces captured, plus an optional task
@@ -513,6 +537,85 @@ function docSubtreeEnd(doc, rootNo, tabWidth) {
 	return end;
 }
 
+/* ── drag and drop ───────────────────────────────────────────────────────
+ * The DOM half of this is untestable without a real mouse, so the decision is
+ * split out here: given a document, the dragged branch, and where the pointer
+ * says to put it, work out the exact line permutation and indent shift. The
+ * mouse handlers below do nothing but produce these three numbers.
+ *
+ * The drop is described as {afterLine, col}:
+ *   afterLine  the block lands immediately after this line; -1 puts it first
+ *   col        the visual column the dragged ROOT should end up at
+ *
+ * Returns null when the drop is a no-op or illegal, so the caller can simply
+ * not apply it. */
+function planDrop(lines, tabWidth, unit, srcStart, srcEnd, afterLine, col) {
+	if (srcStart < 0 || srcEnd < srcStart || srcEnd >= lines.length) return null;
+	if (afterLine < -1 || afterLine >= lines.length) return null;
+
+	/* Dropping anywhere from "just above me" through "inside my own subtree" is
+	 * either a no-op or would make the branch its own parent. */
+	if (afterLine >= srcStart - 1 && afterLine <= srcEnd) return null;
+
+	/* How deep may it land? At most one level under whatever it follows — the
+	 * line above the insertion point, which is the deepest thing it could
+	 * plausibly become a child of. Above the document, only column 0. */
+	const maxCol = afterLine >= 0 ? indentColumns(lines[afterLine], tabWidth) + unit : 0;
+	const target = Math.max(0, Math.min(col, maxCol));
+	const delta = target - indentColumns(lines[srcStart], tabWidth);
+
+	/* Same permutation shape runMove uses, so the whole tail — one replaceRange,
+	 * line mapping, fold restore — is shared. */
+	let spanStart;
+	let spanEnd;
+	const order = [];
+	if (afterLine < srcStart) {
+		spanStart = afterLine + 1;
+		spanEnd = srcEnd;
+		for (let i = srcStart; i <= srcEnd; i++) order.push(i); // the branch, first
+		for (let i = afterLine + 1; i < srcStart; i++) order.push(i); // what it jumped
+	} else {
+		spanStart = srcStart;
+		spanEnd = afterLine;
+		for (let i = srcEnd + 1; i <= afterLine; i++) order.push(i); // what it jumped
+		for (let i = srcStart; i <= srcEnd; i++) order.push(i); // the branch, after
+	}
+
+	return { spanStart, spanEnd, order, delta, col: target, srcStart, srcEnd };
+}
+
+/* Tint the lines being dragged.
+ *
+ * A CodeMirror line decoration, not a class poked onto the DOM: CM re-renders
+ * .cm-line elements whenever the viewport moves, so hand-applied classes vanish
+ * the moment the document scrolls under the pointer. A decoration is part of
+ * the editor state and is re-applied on every render for free.
+ *
+ * Null on any build that doesn't expose StateField/Decoration; the drag itself
+ * still works, it just isn't highlighted. */
+const dragMarkEffect = cmStateEffect ? cmStateEffect.define() : null;
+
+const dragMarkField =
+	cmStateField && cmStateEffect && cmDecoration && cmEditorView
+		? cmStateField.define({
+				create: () => cmDecoration.none,
+				update(deco, tr) {
+					for (const e of tr.effects) {
+						if (!e.is(dragMarkEffect)) continue;
+						if (!e.value) return cmDecoration.none;
+						const line = cmDecoration.line({ class: "obdina-drag-source" });
+						const ranges = [];
+						for (let n = e.value.from; n <= e.value.to; n++) {
+							if (n >= 0 && n < tr.state.doc.lines) ranges.push(line.range(tr.state.doc.line(n + 1).from));
+						}
+						return cmDecoration.set(ranges);
+					}
+					return deco.map(tr.changes);
+				},
+				provide: (f) => cmEditorView.decorations.from(f),
+		  })
+		: null;
+
 /* ── plugin ──────────────────────────────────────────────────────────── */
 
 class ObdinaPlugin extends Plugin {
@@ -542,6 +645,26 @@ class ObdinaPlugin extends Plugin {
 
 		if (cmEditorView && cmEditorSelection) {
 			this.registerEditorExtension(cmEditorView.updateListener.of((u) => this.onEditorUpdate(u)));
+		}
+
+		/* Drag and drop. mousedown comes from the editor; move/up/Escape are on
+		 * the document so a drag keeps tracking when the pointer leaves the
+		 * editor, and still finishes if it is released outside. */
+		if (cmEditorView) {
+			this._drag = null;
+			if (dragMarkField) this.registerEditorExtension(dragMarkField);
+			/* CAPTURE phase on the document, not a CodeMirror domEventHandler.
+			 * Those fire on contentDOM during BUBBLE, and Obsidian's own handler
+			 * on a task checkbox calls stopPropagation() so clicking it doesn't
+			 * move the cursor — which killed the event before we ever saw it,
+			 * making every task undraggable. Capture runs ahead of all of it. */
+			this.registerDomEvent(document, "mousedown", (e) => this.dragMouseDown(e), { capture: true });
+			this.registerDomEvent(document, "mousemove", (e) => this.dragMouseMove(e));
+			this.registerDomEvent(document, "mouseup", (e) => this.dragMouseUp(e));
+			this.registerDomEvent(document, "click", (e) => this.dragClickGuard(e), { capture: true });
+			this.registerDomEvent(document, "keydown", (e) => {
+				if (e.key === "Escape") this.cancelDrag();
+			}, { capture: true });
 		}
 
 		this.addCommand({
@@ -605,6 +728,7 @@ class ObdinaPlugin extends Plugin {
 	 * removes a class we put on <body>. Without this, turning the plugin off
 	 * would leave the cosmetics applied until the next reload. */
 	onunload() {
+		this.cancelDrag();
 		for (const cls of Object.values(BODY_CLASSES)) document.body.classList.remove(cls);
 	}
 
@@ -2307,6 +2431,479 @@ class ObdinaPlugin extends Plugin {
 		}
 	}
 
+	/* ── drag and drop ──────────────────────────────────────────────────
+	 * Mouse events, not HTML5 drag-and-drop: `draggable` inside a contenteditable
+	 * hijacks text selection and gives no control over when a press becomes a
+	 * drag. Both reference outliner plugins reached the same conclusion.
+	 *
+	 * The handle is the bullet, the fold arrow, or a task's checkbox — never the
+	 * text, which must stay selectable.
+	 *
+	 * Crucially this does NOT preventDefault() on mousedown. Obsidian Outliner
+	 * does, which swallows clicks on a task checkbox so the task can no longer
+	 * be ticked. Default is suppressed only once the movement threshold is
+	 * crossed, so a plain click still reaches the checkbox and a drag still
+	 * drags. */
+	/* planDrop() is module-private; the harness needs a way in. */
+	planDropForTest(lines, tabWidth, unit, srcStart, srcEnd, afterLine, col) {
+		return planDrop(lines, tabWidth, unit, srcStart, srcEnd, afterLine, col);
+	}
+
+	isDragHandle(target) {
+		let el = target;
+		for (let guard = 0; el && guard < 6; guard++) {
+			const cl = el.classList;
+			if (cl) {
+				if (
+					cl.contains("cm-formatting-list") ||
+					cl.contains("list-bullet") ||
+					cl.contains("cm-fold-indicator") ||
+					cl.contains("task-list-item-checkbox")
+				) {
+					return true;
+				}
+			}
+			el = el.parentElement;
+		}
+		return false;
+	}
+
+	/* The CodeMirror view under a DOM node, or null. Needed because the drag
+	 * listener is on the document and a vault can have several editors open. */
+	viewFromDOM(node) {
+		try {
+			if (typeof cmEditorView.findFromDOM === "function") {
+				const v = cmEditorView.findFromDOM(node);
+				if (v) return v;
+			}
+			const md = this.app.workspace.getActiveViewOfType(MarkdownView);
+			const cm = md && md.editor && md.editor.cm;
+			if (cm && cm.dom && cm.dom.contains(node)) return cm;
+		} catch (e) {
+			/* fall through */
+		}
+		return null;
+	}
+
+	/* A task line's rendered checkbox. Measured rather than derived from text
+	 * positions because in Live Preview the source characters and the thing you
+	 * actually see have unrelated widths: "- [ ] " is six characters and draws
+	 * as one checkbox. Text coordinates were why the indicator sat off the
+	 * checkbox's right-hand edge.
+	 *
+	 * Bullets deliberately do NOT go through here — see dragMouseDown. */
+	findMarkerEl(view, lineFrom) {
+		const el = this.lineElAt(view, lineFrom);
+		return el ? el.querySelector(".task-list-item-checkbox") : null;
+	}
+
+	/* The .cm-line element containing a position.
+	 *
+	 * Its rect is the full line BOX — it includes the leading, whereas
+	 * coordsAtPos() returns the text glyph box and so stops short of the row's
+	 * real bottom edge. Using the glyph box put the drop indicator inside the
+	 * row instead of between rows. */
+	lineElAt(view, pos) {
+		try {
+			let node = view.domAtPos(pos).node;
+			if (node && node.nodeType === 3) node = node.parentElement;
+			while (node && !(node.classList && node.classList.contains("cm-line"))) node = node.parentElement;
+			return node || null;
+		} catch (e) {
+			return null;
+		}
+	}
+
+	dragMouseDown(event) {
+		if (!this.settings.dragAndDrop) return false;
+		if (this._drag) return false;
+		if (event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return false;
+
+		const view = this.viewFromDOM(event.target);
+		if (!view) return false;
+
+		try {
+			/* posAtCoords() defaults to PRECISE hit-testing, which returns null
+			 * when the pointer is over a widget rather than text — and a task's
+			 * checkbox in Live Preview is a widget. That silently made every
+			 * task undraggable. `false` asks for the nearest position instead. */
+			const pos = view.posAtCoords({ x: event.clientX, y: event.clientY }, false);
+			if (pos == null) return false;
+			const lineObj = view.state.doc.lineAt(pos);
+			const line = lineObj.number - 1; // 0-based
+			const lines = view.state.doc.toString().split("\n");
+			const fenced = this.fencedFor(view.state);
+			if (fenced[line] || !LIST_RE.test(lines[line])) return false;
+
+			/* Is the press on the handle? Two tests, because either alone has a
+			 * hole. The class check is Outliner's and is exact when it matches;
+			 * the geometric check is ICOR's idea and catches anything the class
+			 * names miss — including a checkbox whose markup changes, and the
+			 * indent whitespace, which is a natural place to grab. */
+			let onHandle = this.isDragHandle(event.target);
+			if (!onHandle) {
+				const textStart = lineObj.from + markerTextStart(lines[line]);
+				const c = view.coordsAtPos(textStart);
+				if (c && event.clientX <= c.left + 2) onHandle = true;
+			}
+			if (!onHandle) return false;
+
+			/* Suppress the browser's own selection now. Without this the
+			 * contenteditable starts selecting text the moment the pointer
+			 * moves, and returning true only stops CodeMirror's handling, not
+			 * the browser's.
+			 *
+			 * preventDefault on mousedown does NOT cancel the later click, so a
+			 * checkbox still ticks and a fold arrow still folds. What it does
+			 * cancel is focus and selection, which is exactly what we want. A
+			 * click that follows a real drag is swallowed separately, below. */
+			/* Suppress the browser's own selection — but never on a form
+			 * control. Obsidian's checkbox toggles on the click that follows,
+			 * and swallowing mousedown defaults there is the exact mistake that
+			 * stops Outliner's checkboxes working. Clicking an <input> inside a
+			 * contenteditable doesn't start a text selection anyway, so there is
+			 * nothing to suppress. */
+			const tag = event.target && event.target.tagName;
+			if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT" && tag !== "BUTTON") {
+				event.preventDefault();
+			}
+			/* Two measurements taken once, at the grab.
+			 *
+			 * markerOffset: how far right of its own indent origin the visible
+			 *   marker is drawn. The indicator uses it so it lines up with where
+			 *   the bullet or checkbox will sit.
+			 *
+			 * grabDx: how far right of that same origin the pointer actually
+			 *   grabbed. Subtracting it makes the POINTER represent the item's
+			 *   left edge, so holding still keeps the current depth and one
+			 *   full indent of travel moves exactly one level. Without it the
+			 *   depth was measured from the raw pointer x, which sat a marker's
+			 *   width into the item and so read as one level deeper than it
+			 *   looked. */
+			const charW0 = view.defaultCharacterWidth || 8;
+			const contentRect0 = view.contentDOM.getBoundingClientRect();
+			const srcCol = indentColumns(lines[line], this.tabWidth());
+			const originX = contentRect0.left + srcCol * charW0;
+
+			/* Where the indicator should line up, measured from the item's
+			 * indent origin. The two marker kinds genuinely want different
+			 * reference points, which is not a fudge — it is what "where the
+			 * item begins" looks like in each case:
+			 *
+			 *   task    the LEFT EDGE OF THE CHECKBOX. It is a big, solid
+			 *           element and it visibly is the start of the item;
+			 *           aligning to the text would leave the line hanging off
+			 *           its right-hand side.
+			 *
+			 *   bullet  the TEXT START. The dot is drawn by an absolutely
+			 *           positioned ::after on a span that is about zero wide,
+			 *           so its box sits far left of anything you can see.
+			 *           Aligning there puts the line out in the margin.
+			 *
+			 * Both ends are measured with coordsAtPos rather than estimated, so
+			 * the offset stays correct at any font size or zoom. */
+			const srcParts = ITEM_PARTS_RE.exec(lines[line]);
+			const afterIndent = view.coordsAtPos(lineObj.from + leadingWs(lines[line]).length);
+			let markerX = null;
+			if (srcParts && srcParts[4]) {
+				const markerEl = this.findMarkerEl(view, lineObj.from);
+				if (markerEl) markerX = markerEl.getBoundingClientRect().left;
+			}
+			if (markerX == null) {
+				const c = view.coordsAtPos(lineObj.from + markerTextStart(lines[line]));
+				markerX = c && c.left;
+			}
+			const markerOffset = markerX != null && afterIndent ? markerX - afterIndent.left : 0;
+
+			this._drag = {
+				view,
+				line,
+				startX: event.clientX,
+				startY: event.clientY,
+				grabDx: event.clientX - originX,
+				markerOffset,
+				started: false,
+				indicator: null,
+				plan: null,
+			};
+			return true; // stop CodeMirror starting a selection too
+		} catch (e) {
+			this._drag = null;
+			return false;
+		}
+	}
+
+	dragMouseMove(event) {
+		const d = this._drag;
+		if (!d) return;
+		if (!d.started) {
+			if (Math.abs(event.clientX - d.startX) < DRAG_THRESHOLD && Math.abs(event.clientY - d.startY) < DRAG_THRESHOLD) return;
+			d.started = true;
+			try {
+				/* Tint the branch that is moving. Its extent is fixed for the
+				 * whole gesture, so it is worked out once here rather than on
+				 * every mousemove. */
+				const srcLines = d.view.state.doc.toString().split("\n");
+				const srcEnd = Math.max(
+					listBranchEnd(srcLines, d.line, this.tabWidth()),
+					foldEndAt(this.foldLinesFromState(d.view.state), d.line)
+				);
+				if (dragMarkEffect) d.view.dispatch({ effects: dragMarkEffect.of({ from: d.line, to: srcEnd }) });
+			} catch (e) {
+				/* the tint is cosmetic */
+			}
+			try {
+				d.view.dom.classList.add("obdina-dragging");
+				d.indicator = d.view.dom.ownerDocument.createElement("div");
+				d.indicator.className = "obdina-drop-indicator";
+				d.indicator.style.display = "none";
+				d.view.dom.appendChild(d.indicator);
+			} catch (e) {
+				/* the indicator is cosmetic; the drag still works without it */
+			}
+		}
+		event.preventDefault();
+		this.updateDragTarget(event.clientX, event.clientY);
+	}
+
+	/* Resolve pointer position to {afterLine, col}, build the plan, draw the
+	 * indicator.
+	 *
+	 * Everything here works in CLIENT coordinates. coordsAtPos() returns client
+	 * rects, and the indicator is absolutely positioned inside view.dom, so a
+	 * single subtraction of the editor's own rect converts between them. The
+	 * first version mixed lineBlockAt()'s DOCUMENT coordinates with
+	 * view.documentTop and put the indicator nowhere near the pointer. */
+	updateDragTarget(x, y) {
+		const d = this._drag;
+		if (!d || !d.started) return;
+		d.plan = null;
+		const hide = () => {
+			if (d.indicator) d.indicator.style.display = "none";
+		};
+		try {
+			const view = d.view;
+			const state = view.state;
+			const lines = state.doc.toString().split("\n");
+			const tabWidth = this.tabWidth();
+			const fenced = this.fencedFor(state);
+			const foldSet = this.foldLinesFromState(state);
+
+			// The dragged branch: the item and its subtree, or its whole
+			// collapsed range when folded.
+			const srcStart = d.line;
+			const srcEnd = Math.max(listBranchEnd(lines, srcStart, tabWidth), foldEndAt(foldSet, srcStart));
+
+			const pos = view.posAtCoords({ x, y }, false);
+			if (pos == null) return hide();
+			const hovered = state.doc.lineAt(pos).number - 1;
+			const covering = foldStartCovering(foldSet, hovered);
+			const over = covering >= 0 ? covering : hovered;
+
+			/* Which side of the hovered row? Below means after its whole
+			 * subtree, so a drop never lands inside a branch you can't see. */
+			const rowFrom = state.doc.line(over + 1).from;
+			const rowCoords = view.coordsAtPos(rowFrom);
+			if (!rowCoords) return hide();
+			const below = y > (rowCoords.top + rowCoords.bottom) / 2;
+
+			/* Where the block lands, in document terms.
+			 *
+			 * An insertion point sits between two VISIBLE rows, so "below this
+			 * row" means after everything that row visually covers — which is
+			 * the whole subtree only when the item is COLLAPSED. For an expanded
+			 * parent the next visible row is its own first child, so the block
+			 * belongs immediately after the parent line. Using the subtree end
+			 * unconditionally is what made every drop onto an expanded parent
+			 * land as its LAST child. */
+			const folded = foldEndAt(foldSet, over) >= 0;
+			const covers = folded ? Math.max(listBranchEnd(lines, over, tabWidth), foldEndAt(foldSet, over)) : over;
+			let afterLine = below ? covers : over - 1;
+			// Never point at a hidden line: land after the whole collapsed run.
+			if (afterLine >= 0) {
+				const cov = foldStartCovering(foldSet, afterLine);
+				if (cov >= 0) afterLine = Math.max(afterLine, foldEndAt(foldSet, cov));
+			}
+
+			// Horizontal position picks the depth, snapped to whole indent units.
+			const style = this.indentStyleFor(lines, fenced, tabWidth);
+			const charW = view.defaultCharacterWidth || 8;
+			const unitPx = Math.max(1, charW * style.unit);
+			const contentRect = view.contentDOM.getBoundingClientRect();
+			/* Grab-corrected: the pointer stands for the item's left edge.
+			 * floor(raw + BIAS) rather than round(raw), so a level costs 70% of
+			 * an indent to gain instead of 50%. */
+			const raw = (x - d.grabDx - contentRect.left) / unitPx;
+			const col = Math.floor(raw + DRAG_DEPTH_BIAS) * style.unit;
+
+			const plan = planDrop(lines, tabWidth, style.unit, srcStart, srcEnd, afterLine, col);
+			if (!plan) return hide();
+			d.plan = plan;
+
+			if (d.indicator) {
+				const editorRect = view.dom.getBoundingClientRect();
+
+				/* Draw from the INSERTION POINT, not from the hovered row.
+				 *
+				 * The two are not one-to-one: the lower half of a row and the
+				 * upper half of the row beneath it are different hover positions
+				 * that produce the SAME afterLine. Drawing from the hovered row
+				 * gave each its own y, so the indicator visibly stepped between
+				 * two places that meant the same drop.
+				 *
+				 * afterLine can be a hidden line inside a collapsed subtree, and
+				 * coordsAtPos on unrendered text returns nothing — so resolve it
+				 * to the visible row that owns it first. That is what keeps the
+				 * indicator alive over a collapsed item. */
+				let anchorRow = afterLine;
+				if (anchorRow >= 0) {
+					const cov = foldStartCovering(foldSet, anchorRow);
+					if (cov >= 0) anchorRow = cov;
+				}
+				/* Measure the .cm-line BOX, not the text. coordsAtPos() gives the
+				 * glyph box, which stops above the row's real bottom, so the
+				 * indicator sat inside the row — and the nesting stem, rising
+				 * from it, crossed the text above. The line box includes the
+				 * leading, putting the indicator in the gap between rows. */
+				const anchorPos = state.doc.line((anchorRow >= 0 ? anchorRow : 0) + 1).from;
+				const lineEl = this.lineElAt(view, anchorPos);
+				let edge;
+				if (lineEl) {
+					const r = lineEl.getBoundingClientRect();
+					edge = anchorRow >= 0 ? r.bottom : r.top;
+				} else {
+					const c = view.coordsAtPos(anchorPos);
+					edge = c && (anchorRow >= 0 ? c.bottom : c.top);
+				}
+				if (edge == null) return hide();
+				d.indicator.style.display = "block";
+				d.indicator.style.top = edge - editorRect.top + "px";
+				// Where the marker itself will be drawn, measured at the grab.
+				d.indicator.style.left = contentRect.left - editorRect.left + plan.col * charW + d.markerOffset + "px";
+
+				/* Nesting under the row above, or sitting beside it? The two
+				 * are only a few pixels apart horizontally, which is not enough
+				 * to read at a glance, so the indicator changes shape. */
+				let refLine = -1;
+				if (below) refLine = over;
+				else if (afterLine >= 0) {
+					const cov = foldStartCovering(foldSet, afterLine);
+					refLine = cov >= 0 ? cov : afterLine;
+				}
+				let asChild = false;
+				if (refLine >= 0) {
+					const refItem = enclosingItem(lines, fenced, refLine, tabWidth);
+					if (refItem >= 0) asChild = plan.col > indentColumns(lines[refItem], tabWidth);
+				}
+				d.indicator.classList.toggle("obdina-drop-child", asChild);
+			}
+		} catch (e) {
+			d.plan = null;
+			hide();
+		}
+	}
+
+	dragMouseUp(event) {
+		const d = this._drag;
+		if (!d) return;
+		if (!d.started) {
+			// Never crossed the threshold, so it was a click. Leave it alone —
+			// this is what keeps checkboxes and fold arrows working.
+			this._drag = null;
+			return;
+		}
+		event.preventDefault();
+		/* A real drag happened, so the click that the browser is about to
+		 * synthesise must not reach the checkbox we grabbed — otherwise
+		 * dragging a task by its box would also tick it. */
+		this._suppressClick = true;
+		const plan = d.plan;
+		const view = d.view;
+		this.endDrag();
+		if (plan) this.applyDrop(view, plan);
+	}
+
+	/* Swallow exactly one click, the one synthesised after a drag. */
+	dragClickGuard(event) {
+		if (!this._suppressClick) return;
+		this._suppressClick = false;
+		event.preventDefault();
+		event.stopPropagation();
+	}
+
+	cancelDrag() {
+		if (this._drag) this.endDrag();
+	}
+
+	endDrag() {
+		const d = this._drag;
+		this._drag = null;
+		if (!d) return;
+		try {
+			d.view.dom.classList.remove("obdina-dragging");
+			if (d.indicator) d.indicator.remove();
+			// Cleared before any drop is applied, so the tint can never be
+			// mapped onto the moved lines and left behind.
+			if (dragMarkEffect && d.started) d.view.dispatch({ effects: dragMarkEffect.of(null) });
+		} catch (e) {
+			/* nothing worth reporting */
+		}
+	}
+
+	/* Apply a plan produced by planDrop(). Same shape as runMove's tail: one
+	 * replaceRange over the affected span, then the selection and fold sets are
+	 * pushed through the same line mapping. The only extra is re-indenting the
+	 * dragged lines, done by prefixing/stripping so their internal structure is
+	 * preserved exactly. */
+	applyDrop(view, plan) {
+		const editor = this.editorForView(view);
+		if (!editor) return;
+		const lines = editor.getValue().split("\n");
+		const tabWidth = this.tabWidth();
+		const fenced = computeFenced(lines);
+		const style = this.indentStyleFor(lines, fenced, tabWidth);
+		const { spanStart, spanEnd, order, delta, srcStart, srcEnd } = plan;
+		if (spanEnd >= lines.length) return;
+
+		const shifted = (i) => {
+			if (i < srcStart || i > srcEnd || delta === 0 || isBlank(lines[i])) return lines[i];
+			const ws = leadingWs(lines[i]);
+			const rest = lines[i].slice(ws.length);
+			const next = delta > 0 ? ws + makeIndent(delta, style.useTabs, tabWidth) : stripColumns(ws, -delta, tabWidth);
+			return next + rest;
+		};
+
+		const newLineOf = new Map();
+		order.forEach((oldLine, idx) => newLineOf.set(oldLine, spanStart + idx));
+
+		const cap = this.captureFolds();
+		editor.replaceRange(
+			order.map(shifted).join("\n"),
+			{ line: spanStart, ch: 0 },
+			{ line: spanEnd, ch: lines[spanEnd].length }
+		);
+
+		const mapLine = (l) => (newLineOf.has(l) ? newLineOf.get(l) : l);
+		// Put the cursor on the item that was just dropped, so the keyboard
+		// picks up where the mouse left off.
+		const landed = mapLine(srcStart);
+		editor.setCursor({ line: landed, ch: markerTextStart(shifted(srcStart)) });
+		this.restoreFolds(cap, spanStart, spanEnd, mapLine, lines.length);
+	}
+
+	/* The Editor wrapper for a given CodeMirror view, or null if it isn't the
+	 * active one. Drag handlers only ever have the view. */
+	editorForView(view) {
+		try {
+			const md = this.app.workspace.getActiveViewOfType(MarkdownView);
+			const editor = md && md.editor;
+			if (editor && (!editor.cm || editor.cm === view)) return editor;
+		} catch (e) {
+			/* fall through */
+		}
+		return null;
+	}
+
 	/* ── folding ────────────────────────────────────────────────────────── */
 
 	runFold(editor, ctx, mode, includeRoot) {
@@ -2593,6 +3190,23 @@ class ObdinaSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Drag items by their bullet")
+			.setDesc(
+				cmEditorView
+					? "Drag a list item by its bullet, fold arrow or checkbox to move it — subitems come along, and a collapsed item moves as one unit. Horizontal position while dragging picks the new depth. Text stays selectable, and a plain click on a checkbox still ticks it. Escape cancels."
+					: "Unavailable — this Obsidian build doesn't expose CodeMirror to plugins."
+			)
+			.addToggle((t) =>
+				t
+					.setValue(this.plugin.settings.dragAndDrop && !!cmEditorView)
+					.setDisabled(!cmEditorView)
+					.onChange(async (v) => {
+						this.plugin.settings.dragAndDrop = v;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
 			.setName("Preserve folds through edits")
 			.setDesc(
 				"Keep collapsed subitems collapsed when you move, indent or outdent an item. " +
@@ -2631,6 +3245,19 @@ class ObdinaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.bulletSpacing).onChange(async (v) => {
 					this.plugin.settings.bulletSpacing = v;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Tint items while dragging them")
+			.setDesc(
+				"Wash the item being dragged, and its subitems, in a neutral grey so it is obvious what is moving. " +
+					"Deliberately not the accent colour — that already marks where the item will land."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.dragSourceTint).onChange(async (v) => {
+					this.plugin.settings.dragSourceTint = v;
 					await this.plugin.saveSettings();
 				})
 			);

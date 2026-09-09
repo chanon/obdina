@@ -218,6 +218,18 @@ It corrects the column *after* CodeMirror's own move rather than replacing it,
 so goal-column memory, soft-wrapped rows and tables all behave exactly as
 before. Clicks, `Home` and `Shift`+arrow selections are untouched.
 
+### Drag and drop
+
+Drag an item by its **bullet, fold arrow or checkbox** to move it. Its subitems
+come along, and a collapsed item moves as one unit. While dragging, an
+indicator shows where it will land and **horizontal position picks the depth** —
+move right to make it a subitem, left to outdent it. `Escape` cancels.
+
+Bullets and fold arrows show a grab cursor so it is discoverable, and that hint
+disappears if you turn dragging off. The text of an item is never a drag handle,
+so selecting text works exactly as before. And a plain click on a task checkbox still ticks the task: the press
+only becomes a drag once the pointer has actually moved a few pixels.
+
 ### Whole-item selection
 
 When a selection spans more than one list item, expand it to whole items and
@@ -241,6 +253,9 @@ restyles your notes until you ask it to:
 - **Add space between bullet and text** — Obsidian has no setting for this gap;
   it is just the literal space after the `-` in your note. This adds a visual
   margin without touching the text. Checkboxes get a matching nudge.
+- **Tint items while dragging them** (on by default) — wash the dragged item and
+  its subitems in neutral grey so it is obvious what is moving. Not the accent
+  colour: that already marks where it will land.
 
 Both are driven by CSS variables, so a snippet can retune them without turning
 the feature off: `--obdina-collapsed-bullet-size`, `--obdina-bullet-gap`,

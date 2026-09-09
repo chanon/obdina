@@ -76,3 +76,129 @@ body.obdina-bullet-spacing .list-bullet {
 body.obdina-bullet-spacing .task-list-item-checkbox {
 	margin-inline-end: var(--obdina-checkbox-gap) !important;
 }
+
+/* ── Drag and drop ────────────────────────────────────────────────
+ * NOT scoped to a body class, unlike the cosmetics above: this is the drag
+ * feature's own UI, not a taste preference. Without it a drag has no visible
+ * drop indicator and the feature is unusable rather than merely plain.
+ *
+ * The indicator is positioned by main.js in the editor's own coordinate space,
+ * so .cm-editor needs to be a positioning context. It already is in practice;
+ * the rule is stated anyway so this doesn't depend on that staying true. */
+
+.obdina-dragging {
+	cursor: grabbing;
+}
+
+/* Keep text from being selected mid-drag. The pointer left the bullet the
+ * moment the drag started, so any selection it makes is noise. */
+.obdina-dragging .cm-content {
+	user-select: none;
+}
+
+.cm-editor {
+	position: relative;
+}
+
+/* main.js sets `top` to the bottom edge of the .cm-line box it follows. The
+ * nudge is a margin so it can be retuned from a snippet without touching the
+ * inline style JavaScript writes. Positive moves the whole indicator down. */
+.obdina-drop-indicator {
+	position: absolute;
+	right: 0;
+	height: 0;
+	margin-top: var(--obdina-drop-nudge, 1px);
+	border-top: 2px solid var(--interactive-accent, #7f6df2);
+	border-radius: 1px;
+	pointer-events: none;
+	z-index: 10;
+	opacity: 0.9;
+}
+
+/* A dot on the left end, so the indent level the drop will land at is readable
+ * at a glance rather than having to be inferred from where the line starts. */
+.obdina-drop-indicator::before {
+	content: "";
+	position: absolute;
+	left: -4px;
+	top: -4px;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--interactive-accent, #7f6df2);
+	/* A ring in the background colour, so the dot stays legible even when it
+	 * lands over a glyph rather than in the gap between rows. */
+	box-shadow: 0 0 0 1.5px var(--background-primary, #fff);
+}
+
+/* Landing as a SUBITEM of the row above, rather than beside it.
+ *
+ * The two differ by one indent horizontally, which is too small to read while
+ * the pointer is moving — so the shape changes as well. A stem rises from the
+ * left end toward the row above, drawing the parent-child link the drop will
+ * create. Same idea as a tree view's elbow connector.
+ *
+ * Kept SHORT deliberately: a tall stem reaches into the text of the row above
+ * and reads as scribble. 7px stays in the leading and descender space, where
+ * there is nothing to collide with.
+ *
+ * GEOMETRY — the stem is the reference, everything aligns to it:
+ *   stem  left -1, width 2   → spans x -1..+1, centre x = 0
+ *                top -7, height 7 → spans y -7..0, top end y = -7
+ *   dot   left -2, width 4   → spans x -2..+2, centre x = 0   (matches)
+ *                top -9, height 4 → spans y -9..-5, centre y = -7 (rides the end)
+ * The dot was left -3 and so sat 1px to the left of the stem. If either size
+ * changes, recompute both offsets from these two lines. */
+.obdina-drop-indicator.obdina-drop-child::after {
+	content: "";
+	position: absolute;
+	left: -1px;
+	top: -7px;
+	width: 2px;
+	height: 7px;
+	background: var(--interactive-accent, #7f6df2);
+	border-radius: 1px;
+}
+
+/* The dot moves to the TOP of the stem when nesting — up beside the parent row
+ * rather than down on the insertion line — so it reads as "this hangs off the
+ * item up there", which is what the drop does. */
+.obdina-drop-indicator.obdina-drop-child::before {
+	left: -2px;
+	top: -9px;
+	width: 4px;
+	height: 4px;
+	border-radius: 50%;
+}
+
+/* The branch currently being dragged.
+ *
+ * Deliberately NEUTRAL rather than accent-coloured: the accent is already
+ * spoken for by the drop indicator, and using it twice would leave nothing to
+ * distinguish "what is moving" from "where it lands". A grey wash also stays
+ * legible over any theme, in light and dark alike, without knowing anything
+ * about the text colour underneath. */
+body.obdina-drag-tint .cm-line.obdina-drag-source {
+	background-color: var(--obdina-drag-source-bg, rgba(127, 137, 154, 0.15));
+	border-radius: 3px;
+}
+
+/* ── Bullets look grabbable ──────────────────────────────────────
+ * Gated on obdina-drag-enabled, which tracks the dragAndDrop setting: promising
+ * a drag the plugin will not perform is worse than no affordance at all.
+ *
+ * A task's checkbox is deliberately left with its normal cursor. It is
+ * draggable too, but clicking it is the primary action and `grab` would imply
+ * otherwise. */
+body.obdina-drag-enabled .cm-formatting-list,
+body.obdina-drag-enabled .list-bullet,
+body.obdina-drag-enabled .cm-fold-indicator {
+	cursor: grab;
+}
+
+/* Once a drag is under way the whole editor is in that mode, so nothing should
+ * still be advertising `grab` or a text caret underneath the pointer. */
+.obdina-dragging,
+.obdina-dragging * {
+	cursor: grabbing !important;
+}
