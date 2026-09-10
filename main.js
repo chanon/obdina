@@ -81,6 +81,7 @@ const DEFAULT_SETTINGS = {
 	relocateOnOutdent: false,
 	preserveFolds: true,
 	snapSelection: true,
+	progressiveSelect: true,
 	smartEnter: true,
 	enterMakesFirstChild: true,
 	smartBackspace: true,
@@ -494,6 +495,132 @@ function nextItemPrefix(line) {
 	return ws + marker + gap + (box ? "[ ] " : "");
 }
 
+/* The contiguous run of list lines around `line`.
+ *
+ * Bounded by anything that isn't part of the list: a heading, a flush-left
+ * paragraph, a code fence. Interior blank lines are allowed through (loosely
+ * spaced lists are still one list) and so are indented continuation lines.
+ *
+ * This is also what bounds the sibling run in selectionLadder(). At top level
+ * prevSiblingLine()'s `if (c < col) return -1` can never fire — nothing is
+ * shallower than column 0 — so it walks straight through headings and
+ * paragraphs and treats every top-level item in the note as one sibling group.
+ * Clamping to this block is what stops that. */
+function listBlockBounds(lines, fenced, tabWidth, line) {
+	const stops = (i) =>
+		fenced[i] || (!isBlank(lines[i]) && !LIST_RE.test(lines[i]) && indentColumns(lines[i], tabWidth) === 0);
+
+	let first = line;
+	for (let i = line - 1; i >= 0; i--) {
+		if (stops(i)) break;
+		if (!isBlank(lines[i])) first = i;
+	}
+	let last = line;
+	for (let i = line + 1; i < lines.length; i++) {
+		if (stops(i)) break;
+		if (!isBlank(lines[i])) last = i;
+	}
+	return { first, last };
+}
+
+/* Nearest heading at or above `from`, or -1. */
+function headingAbove(lines, fenced, from) {
+	for (let i = Math.min(from, lines.length - 1); i >= 0; i--) {
+		if (!fenced[i] && HEADING_RE.test(lines[i])) return i;
+	}
+	return -1;
+}
+
+/* The widening ladder Ctrl+A climbs, from the item at `line` outwards:
+ *
+ *   1  the item's text, without its bullet or checkbox
+ *   2  the whole item line, plus its subitems
+ *   3  that item and all its siblings, each with their subitems
+ *   4  the parent, with everything under it
+ *   5  the parent and all ITS siblings
+ *   …  repeating out to the top level of the list
+ *   n  the whole contiguous list
+ *   n+1 the heading section containing it, then each enclosing heading
+ *   …  and finally the document
+ *
+ * Returned smallest-first with consecutive duplicates removed, because the
+ * stages genuinely coincide sometimes — an only child's branch is also its
+ * sibling group — and a press that appears to do nothing reads as a bug. */
+function selectionLadder(lines, fenced, tabWidth, line) {
+	const stages = [];
+	if (line < 0 || line >= lines.length || !LIST_RE.test(lines[line])) return stages;
+
+	const whole = (a, b) => ({ from: { line: a, ch: 0 }, to: { line: b, ch: lines[b].length } });
+	const block = listBlockBounds(lines, fenced, tabWidth, line);
+
+	stages.push({
+		from: { line, ch: markerTextStart(lines[line]) },
+		to: { line, ch: lines[line].length },
+	});
+
+	let cur = line;
+	let guard = 0;
+	while (cur >= 0 && guard++ < 100) {
+		const col = indentColumns(lines[cur], tabWidth);
+		stages.push(whole(cur, listBranchEnd(lines, cur, tabWidth)));
+
+		// The sibling run at this depth, each sibling with its subtree, clamped
+		// to the list this item actually belongs to.
+		let first = cur;
+		for (let g = 0; g < 1000; g++) {
+			const p = prevSiblingLine(lines, fenced, first, col, tabWidth);
+			if (p < 0 || p < block.first) break;
+			first = p;
+		}
+		let last = cur;
+		for (let g = 0; g < 1000; g++) {
+			const n = nextSiblingLine(lines, fenced, listBranchEnd(lines, last, tabWidth) + 1, col, tabWidth);
+			if (n < 0 || n > block.last) break;
+			last = n;
+		}
+		stages.push(whole(first, Math.min(listBranchEnd(lines, last, tabWidth), block.last)));
+
+		cur = parentLine(lines, fenced, cur, col, tabWidth);
+	}
+
+	// The whole list, which a sibling run only reaches if the list is flat.
+	stages.push(whole(block.first, block.last));
+
+	/* Then out through the heading hierarchy: the section this list sits in,
+	 * then its parent section, and so on. Each step needs a STRICTLY shallower
+	 * heading, or an H2 following an H2 would just repeat the same span. */
+	let h = headingAbove(lines, fenced, block.first);
+	let hguard = 0;
+	while (h >= 0 && hguard++ < 20) {
+		const level = HEADING_RE.exec(lines[h])[1].length;
+		stages.push(whole(h, headingBranchEnd(lines, h, level, fenced)));
+		let next = -1;
+		for (let i = h - 1; i >= 0; i--) {
+			if (fenced[i]) continue;
+			const m = HEADING_RE.exec(lines[i]);
+			if (m && m[1].length < level) {
+				next = i;
+				break;
+			}
+		}
+		h = next;
+	}
+
+	stages.push(whole(0, lines.length - 1));
+
+	const out = [];
+	for (const st of stages) {
+		const prev = out[out.length - 1];
+		if (prev && cmpPos(prev.from, st.from) === 0 && cmpPos(prev.to, st.to) === 0) continue;
+		out.push(st);
+	}
+	return out;
+}
+
+function cmpPos(a, b) {
+	return a.line !== b.line ? a.line - b.line : a.ch - b.ch;
+}
+
 /* ── selection snapping (CodeMirror doc, 1-based lines) ──────────────────
  * These walk CodeMirror's Text object directly instead of splitting the whole
  * document into an array. Selection changes fire on every mousemove during a
@@ -636,6 +763,7 @@ class ObdinaPlugin extends Plugin {
 						{ key: "Enter", run: () => this.handleEnter() },
 						{ key: "Backspace", run: () => this.handleBackspace() },
 						{ key: "Delete", run: () => this.handleDelete() },
+						{ key: "Mod-a", run: () => this.handleSelectAll() },
 						{ key: "ArrowDown", run: () => this.handleArrow(1) },
 						{ key: "ArrowUp", run: () => this.handleArrow(-1) },
 					])
@@ -1615,6 +1743,97 @@ class ObdinaPlugin extends Plugin {
 			requestAnimationFrame(apply);
 		}
 		return true;
+	}
+
+	/* ── Ctrl/Cmd+A widens by one outline level ─────────────────────────
+	 * Core selects the whole note in one go. In an outline the useful unit is
+	 * almost never the note — it is this item's text, or this branch, or this
+	 * group of siblings. So each press climbs one rung of selectionLadder(),
+	 * ending at the whole document, which is where core would have started.
+	 *
+	 * No state is kept between presses. The next rung is simply the first one
+	 * that strictly contains what is already selected, which means the sequence
+	 * is also correct when the selection came from dragging or from a previous
+	 * command — nothing has to have "started" a Ctrl+A sequence. */
+	handleSelectAll() {
+		if (!this.settings.progressiveSelect) return false;
+		if (this.isSuggestOpen()) return false;
+
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		const editor = view && view.editor;
+		const sub = view && view.currentMode;
+		if (!editor) return false;
+
+		const sels = editor.listSelections();
+		if (sels.length !== 1) return false;
+
+		try {
+			const sel = sels[0];
+			const from = cmpPos(sel.anchor, sel.head) <= 0 ? sel.anchor : sel.head;
+			const to = cmpPos(sel.anchor, sel.head) <= 0 ? sel.head : sel.anchor;
+
+			const lines = editor.getValue().split("\n");
+			const fenced = computeFenced(lines);
+			const tabWidth = this.tabWidth();
+
+			// The usual trap: a cursor parked past a fold marker is on a hidden
+			// line, and the ladder would be built for an item off screen.
+			const folds = this.foldLines(editor, sub);
+			const covering = foldStartCovering(folds, from.line);
+			let base = covering >= 0 ? covering : from.line;
+			if (fenced[base]) return false;
+
+			/* Once the selection has grown past the list — into a heading
+			 * section — its first line is no longer a list item, and rebuilding
+			 * the ladder from there produced nothing at all, so the climb
+			 * stopped dead at the first heading. Re-anchor on the first list
+			 * item inside the selection instead.
+			 *
+			 * This is the cost of being stateless: the ladder is rederived from
+			 * the selection each press, so the selection has to keep pointing at
+			 * something a ladder can be built from. Worth it — no state to go
+			 * stale — but the re-anchor is not optional. */
+			if (!LIST_RE.test(lines[base])) {
+				let found = -1;
+				for (let i = base; i <= Math.min(to.line, lines.length - 1); i++) {
+					if (!fenced[i] && LIST_RE.test(lines[i])) {
+						found = i;
+						break;
+					}
+				}
+				if (found < 0) return false;
+				base = found;
+			}
+
+			const ladder = selectionLadder(lines, fenced, tabWidth, base);
+			if (!ladder.length) return false; // not in a list — core selects the note
+
+			/* Compare against the VISIBLE item too. A caret parked past a fold
+			 * marker sits on a hidden line, which is contained by no rung below
+			 * the branch — so the first two rungs got skipped and the first
+			 * press jumped straight to the whole collapsed branch. Treat it as
+			 * a caret on the item the user can actually see. */
+			let cmpFrom = from;
+			let cmpTo = to;
+			if (covering >= 0 && cmpPos(from, to) === 0) {
+				cmpFrom = { line: base, ch: markerTextStart(lines[base]) };
+				cmpTo = cmpFrom;
+			}
+
+			for (const stage of ladder) {
+				const containsIt = cmpPos(stage.from, cmpFrom) <= 0 && cmpPos(stage.to, cmpTo) >= 0;
+				const same = cmpPos(stage.from, cmpFrom) === 0 && cmpPos(stage.to, cmpTo) === 0;
+				if (containsIt && !same) {
+					editor.setSelections([{ anchor: stage.from, head: stage.to }]);
+					return true;
+				}
+			}
+			// Already at the top rung: let core have it, so a second press still
+			// does the obvious thing rather than nothing.
+			return false;
+		} catch (e) {
+			return false;
+		}
 	}
 
 	/* ── Delete at the end of an item ───────────────────────────────────
@@ -3083,6 +3302,23 @@ class ObdinaSettingTab extends PluginSettingTab {
 					.setDisabled(!cmEditorView)
 					.onChange(async (v) => {
 						this.plugin.settings.snapSelection = v;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Ctrl/Cmd+A selects by outline level")
+			.setDesc(
+				cmKeymap
+					? "Each press widens by one level: the item's text, then the item and its subitems, then all its siblings, then the parent, and so on out to the whole note — which is where Obsidian's own Select all starts. Outside a list it behaves normally."
+					: "Unavailable — this Obsidian build doesn't expose CodeMirror to plugins."
+			)
+			.addToggle((t) =>
+				t
+					.setValue(this.plugin.settings.progressiveSelect && !!cmKeymap)
+					.setDisabled(!cmKeymap)
+					.onChange(async (v) => {
+						this.plugin.settings.progressiveSelect = v;
 						await this.plugin.saveSettings();
 					})
 			);

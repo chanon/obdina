@@ -230,6 +230,30 @@ disappears if you turn dragging off. The text of an item is never a drag handle,
 so selecting text works exactly as before. And a plain click on a task checkbox still ticks the task: the press
 only becomes a drag once the pointer has actually moved a few pixels.
 
+### Ctrl/Cmd+A selects by outline level
+
+Each press widens by one level instead of grabbing the whole note at once:
+
+```
+1.  the item's text            (without its bullet or checkbox)
+2.  the item and its subitems
+3.  that item and all its siblings, each with their subitems
+4.  the parent, with everything under it
+5.  the parent and all its siblings
+…   repeating out to the top of the list
+n.  the whole contiguous list
+n+1 the heading section it sits in, then each enclosing heading
+…   and finally the whole note — where Obsidian's Select all begins
+```
+
+A list is bounded by anything that isn't part of it: a heading, a flush-left
+paragraph, a code fence. Blank lines inside a list don't end it.
+
+There is no hidden sequence state: the next level is simply the smallest one
+that fully contains what is already selected. So it continues correctly from a
+selection made by dragging or by any other command, and once the whole note is
+selected it hands over to Obsidian. Outside a list it does nothing at all.
+
 ### Whole-item selection
 
 When a selection spans more than one list item, expand it to whole items and
