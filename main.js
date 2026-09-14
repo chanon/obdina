@@ -48,6 +48,9 @@ let cmPrec = null;
 let cmEditorView = null;
 let cmEditorSelection = null;
 let cmFoldedRanges = null;
+let cmFoldEffect = null;
+let cmUnfoldEffect = null;
+let cmFoldable = null;
 let cmDecoration = null;
 let cmStateField = null;
 let cmStateEffect = null;
@@ -67,7 +70,13 @@ try {
 try {
 	// The authoritative fold state. Obsidian's getFoldInfo() is a wrapper over
 	// this, and going straight to the source avoids depending on its shape.
-	cmFoldedRanges = require("@codemirror/language").foldedRanges;
+	const lang = require("@codemirror/language");
+	cmFoldedRanges = lang.foldedRanges;
+	// For dispatchFoldDiff(): change only the folds that differ, instead of
+	// Obsidian's applyFoldInfo() unfold-everything-then-refold rebuild.
+	cmFoldEffect = lang.foldEffect || null;
+	cmUnfoldEffect = lang.unfoldEffect || null;
+	cmFoldable = typeof lang.foldable === "function" ? lang.foldable : null;
 } catch (e) {
 	/* fall back to getFoldInfo() */
 }
@@ -1249,11 +1258,7 @@ class ObdinaPlugin extends Plugin {
 			/* fall back to the edited span */
 		}
 
-		// Apply immediately to avoid a visible flash, then again once the
-		// document change has settled and CodeMirror has re-measured.
-		const apply = () => this.applyPreservingScroll(cap.editor, cap.sub, info, anchor);
-		apply();
-		requestAnimationFrame(apply);
+		this.applyPreservingScroll(cap.editor, cap.sub, info, anchor);
 	}
 
 	/* An editor suggest popup (wikilink, tag, natural-language date…) uses Tab
@@ -1451,9 +1456,7 @@ class ObdinaPlugin extends Plugin {
 				.concat([{ from: toLine, to: foldEnd }])
 				.sort((a, b) => a.from - b.from);
 			const info = { folds: next, lines: cmView.state.doc.lines };
-			const apply = () => this.applyPreservingScroll(editor, sub, info, toLine);
-			apply();
-			requestAnimationFrame(apply);
+			this.applyPreservingScroll(editor, sub, info, toLine);
 		} catch (e) {
 			/* a lost fold beats a broken edit */
 		}
@@ -1697,9 +1700,7 @@ class ObdinaPlugin extends Plugin {
 				const shifted = folds
 					.map((f) => ({ from: f.from > root ? f.from + 1 : f.from, to: f.to > root ? f.to + 1 : f.to }))
 					.sort((a, b) => a.from - b.from);
-				const apply = () => sub.applyFoldInfo({ folds: shifted, lines: lines.length + 1 });
-				apply();
-				requestAnimationFrame(apply);
+				this.applyPreservingScroll(editor, sub, { folds: shifted, lines: lines.length + 1 }, root);
 			}
 			return true;
 		}
@@ -1738,9 +1739,7 @@ class ObdinaPlugin extends Plugin {
 					to: f.to > end ? f.to + 1 : f.to,
 				}))
 				.sort((a, b) => a.from - b.from);
-			const apply = () => sub.applyFoldInfo({ folds: remapped, lines: lines.length + 1 });
-			apply();
-			requestAnimationFrame(apply);
+			this.applyPreservingScroll(editor, sub, { folds: remapped, lines: lines.length + 1 }, end);
 		}
 		return true;
 	}
@@ -1972,9 +1971,7 @@ class ObdinaPlugin extends Plugin {
 				.filter((f) => f.to > f.from)
 				.sort((a, b) => a.from - b.from);
 			try {
-				const apply = () => sub.applyFoldInfo({ folds: remapped, lines: lines.length - 1 });
-				apply();
-				requestAnimationFrame(apply);
+				this.applyPreservingScroll(editor, sub, { folds: remapped, lines: lines.length - 1 }, cur.line);
 			} catch (e) {
 				/* a lost fold beats a broken key */
 			}
@@ -2163,9 +2160,7 @@ class ObdinaPlugin extends Plugin {
 				.filter((f) => f.to > f.from)
 				.sort((a, b) => a.from - b.from);
 			try {
-				const apply = () => sub.applyFoldInfo({ folds: remapped, lines: lines.length - 1 });
-				apply();
-				requestAnimationFrame(apply);
+				this.applyPreservingScroll(editor, sub, { folds: remapped, lines: lines.length - 1 }, caret.line);
 			} catch (e) {
 				/* undocumented API — a lost fold beats a broken key */
 			}
@@ -2644,9 +2639,7 @@ class ObdinaPlugin extends Plugin {
 			}
 			remapped.sort((a, b) => a.from - b.from);
 			const info = { folds: remapped, lines: lines.length - removed };
-			const apply = () => this.applyPreservingScroll(editor, sub, info, caret.line);
-			apply();
-			requestAnimationFrame(apply);
+			this.applyPreservingScroll(editor, sub, info, caret.line);
 		}
 	}
 
@@ -3197,11 +3190,68 @@ class ObdinaPlugin extends Plugin {
 		}
 	}
 
-	/* applyFoldInfo() rebuilds the entire fold set rather than diffing it, which
-	 * forces a CodeMirror re-measure and leaves the scroller pointing at the
-	 * wrong content. Collapsing lines also changes total document height, so
-	 * restoring the old scrollTop alone lands somewhere else. Instead anchor on
-	 * the branch root: hold its distance from the viewport top constant. */
+	/* Bring the editor's fold set to `info` by dispatching only the DIFFERENCE
+	 * — unfold what is no longer wanted, fold what is missing — in one
+	 * transaction. Obsidian's applyFoldInfo() instead runs unfoldAll() and
+	 * refolds everything, so every fold in the document, including ones far
+	 * above the viewport, is torn down and rebuilt with *estimated* heights;
+	 * the next CodeMirror measure then corrects them and the scroller lands
+	 * somewhere else. Untouched folds keep their measured heights, so there
+	 * is nothing to correct.
+	 *
+	 * Ranges are resolved exactly as applyFoldInfo does it (Obsidian's
+	 * foldable range for the start line, extended to the end line), so the
+	 * result is indistinguishable from the rebuild — just cheaper and still.
+	 * Returns false when CodeMirror's fold API isn't exposed, so the caller
+	 * can fall back to applyFoldInfo(). */
+	dispatchFoldDiff(cm, info) {
+		if (!cmFoldEffect || !cmUnfoldEffect || !cmFoldedRanges || !cmFoldable) return false;
+		if (!cm || !cm.state || !info || !Array.isArray(info.folds)) return false;
+		try {
+			const state = cm.state;
+			const doc = state.doc;
+			if (info.lines !== doc.lines) return false; // same guard as applyFoldInfo
+			const key = (r) => r.from + ":" + r.to;
+
+			const want = new Map();
+			for (const f of info.folds) {
+				const s = doc.line(f.from + 1);
+				const l = doc.line(Math.min(f.to + 1, doc.lines));
+				const c = cmFoldable(state, s.from, s.to);
+				if (!c) continue;
+				const r = { from: c.from, to: Math.max(c.to, l.to) };
+				want.set(key(r), r);
+			}
+
+			const have = new Map();
+			const iter = cmFoldedRanges(state).iter();
+			while (iter.value) {
+				const r = { from: iter.from, to: iter.to };
+				have.set(key(r), r);
+				iter.next();
+			}
+
+			const effects = [];
+			for (const [k, r] of have) if (!want.has(k)) effects.push(cmUnfoldEffect.of(r));
+			for (const [k, r] of want) if (!have.has(k)) effects.push(cmFoldEffect.of(r));
+			if (effects.length) cm.dispatch({ effects });
+			return true;
+		} catch (e) {
+			return false;
+		}
+	}
+
+	/* Apply a fold set without the document visibly moving.
+	 *
+	 * Anchor on a line — the cursor, or the branch root — and hold its
+	 * distance from the viewport top constant across the change. The anchor
+	 * is corrected once synchronously (from CodeMirror's current, partly
+	 * estimated, height map) and once more in the next animation frame, which
+	 * runs AFTER CodeMirror's own measure (requested during the dispatch, so
+	 * queued ahead of ours) and BEFORE the browser paints. Nothing is applied
+	 * twice: an earlier version re-ran the whole fold rebuild in that frame,
+	 * which put a second, differently-positioned paint on screen — the
+	 * "document flashes" report when scrolled away from the top. */
 	applyPreservingScroll(editor, subView, info, anchorLine) {
 		const cm = editor.cm;
 		const scroller = cm && cm.scrollDOM;
@@ -3218,11 +3268,13 @@ class ObdinaPlugin extends Plugin {
 		const anchorPos = editor.posToOffset({ line: anchorLine, ch: 0 });
 		const offsetInViewport = cm.lineBlockAt(anchorPos).top - scroller.scrollTop;
 
-		subView.applyFoldInfo(info);
+		if (!this.dispatchFoldDiff(cm, info)) subView.applyFoldInfo(info);
 
 		const restore = () => {
-			const top = cm.lineBlockAt(anchorPos).top - offsetInViewport;
-			scroller.scrollTop = Math.max(0, top);
+			const top = Math.max(0, cm.lineBlockAt(anchorPos).top - offsetInViewport);
+			// Only write when it matters: a scrollTop assignment fires a scroll
+			// event and another measure, even when the value is unchanged.
+			if (Math.abs(scroller.scrollTop - top) > 1) scroller.scrollTop = top;
 		};
 		restore();
 		requestAnimationFrame(restore);
