@@ -1,8 +1,8 @@
-# Obdina Outliner
+# Obdyna Outliner
 
 Dynalist-style outlining for [Obsidian](https://obsidian.md).
 
-Obsidian's built-in list commands operate on **one line**. Obdina operates on the
+Obsidian's built-in list commands operate on **one line**. Obdyna operates on the
 **item and everything nested under it** — so indenting, outdenting and moving a
 list item takes its subitems along, the way a dedicated outliner does.
 
@@ -15,7 +15,7 @@ its whole subtree*.
 
 Obsidian's core `Tab` is generic text indentation with a list-flavoured name —
 it shifts only the cursor's line, so any children silently stop being children.
-Obdina moves the branch as a unit.
+Obdyna moves the branch as a unit.
 
 Nesting depth is measured in *visual columns*, never in a specific whitespace
 character, so files that mix tabs and spaces are read correctly instead of
@@ -35,7 +35,7 @@ certainty.
 
 ### Dynalist-style outdent (optional)
 
-When you outdent an item that still has siblings below it, Obdina can move the
+When you outdent an item that still has siblings below it, Obdyna can move the
 item and its subitems *below the old parent* rather than dedenting in place:
 
 ```
@@ -81,7 +81,7 @@ with it.
 With the [Tasks](https://publish.obsidian.md/tasks/) plugin, completing a
 recurring task adds the next instance on the line above and leaves the completed
 one beside it. Turn on *Nest completed recurring tasks under the new one* and
-Obdina tucks the finished line under the live one, so each task carries a
+Obdyna tucks the finished line under the live one, so each task carries a
 foldable log of itself:
 
 ```
@@ -98,14 +98,14 @@ fires only when the line above is an *open* instance of the *same* task at the
 *same* indent, and never on undo or redo.
 
 Requires the Tasks setting **“Next recurrence appears on the line below”** to be
-**off** (its default), so the new instance lands above the completed one. Obdina
+**off** (its default), so the new instance lands above the completed one. Obdyna
 reads that setting and warns you in its own settings if it is on, rather than
 quietly doing nothing.
 
 ### Delete joins items, not lines
 
 At the end of an item, core's forward-`Delete` joins the raw next **line** on,
-dragging its indent, bullet and checkbox into the middle of your text. Obdina
+dragging its indent, bullet and checkbox into the middle of your text. Obdyna
 joins the two items' **text** and nothing else, with two rules on top:
 
 - **Completion is sticky.** If either item is done, the merged item is done. An
@@ -152,7 +152,7 @@ item's row.
 
 Moving, indenting or outdenting an item normally re-expands every collapsed
 child, because replacing a range of text drops CodeMirror's fold decorations.
-Obdina captures the fold set before each edit and remaps it through the same
+Obdyna captures the fold set before each edit and remaps it through the same
 transformation the text got, so collapsed subtrees stay collapsed.
 
 ### Enter knows where the new item belongs
@@ -164,7 +164,7 @@ subitems silently become children of the new empty item:
 
 ```
 - parent            - parent            - parent
-  - child1   core     -          Obdina   - (new)
+  - child1   core     -          Obdyna   - (new)
   - child2     →        - child1     →      - child1
                         - child2            - child2
 ```
@@ -178,7 +178,7 @@ Both have their own toggle.
 ### Backspace joins items, not lines
 
 At the **start** of an item, core's `Backspace` joins the line into the one
-above and drags the marker with it — `- a` + `- b` becomes `- a- b`. Obdina
+above and drags the marker with it — `- a` + `- b` becomes `- a- b`. Obdyna
 joins the *text* and drops the marker, with two rules on top:
 
 - **An item with subitems does nothing.** Core's join would re-parent the whole
@@ -187,7 +187,7 @@ joins the *text* and drops the marker, with two rules on top:
   (when this is its first child), a deeper item in another branch, or a
   collapsed one. The collapsed case is the one core gets badly wrong: joining
   across a fold's start tears it open and dumps every hidden child on screen.
-  Obdina appends to the collapsed item's own line and re-applies the fold, so
+  Obdyna appends to the collapsed item's own line and re-applies the fold, so
   only text moves.
 
 Either way the cursor lands on the seam, before the text it carried up. If the
@@ -198,7 +198,7 @@ as usual, as it does for Backspace anywhere but the start of an item.
 
 A collapsed item and its hidden subtree share one visual row, which can leave
 the cursor parked on a hidden line and make arrow keys skip the folded item.
-Obdina steps by *visible line* using the fold set instead of screen geometry.
+Obdyna steps by *visible line* using the fold set instead of screen geometry.
 
 ### The cursor stays out of the bullet
 
@@ -207,7 +207,7 @@ moving from a long line onto a short indented one can drop the cursor into an
 item's leading whitespace. Live Preview then reveals the literal `- ` and the
 item looks like it un-rendered into plain text.
 
-After `Up` / `Down`, Obdina moves such a cursor to the first character of the
+After `Up` / `Down`, Obdyna moves such a cursor to the first character of the
 item's text. And when the cursor *starts* on the first character of an item's
 text, it lands on the first character of the next item's text — so moving
 through a list keeps the cursor on the text, whatever each item's indentation
@@ -282,14 +282,14 @@ restyles your notes until you ask it to:
   colour: that already marks where it will land.
 
 Both are driven by CSS variables, so a snippet can retune them without turning
-the feature off: `--obdina-collapsed-bullet-size`, `--obdina-bullet-gap`,
-`--obdina-checkbox-gap`.
+the feature off: `--obdyna-collapsed-bullet-size`, `--obdyna-bullet-gap`,
+`--obdyna-checkbox-gap`.
 
 ## Commands and hotkeys
 
 `Tab` / `Shift+Tab` are claimed automatically (and can be turned off in
 settings). **No other hotkeys are set by default** — assign them under
-*Settings → Hotkeys*, search "Obdina".
+*Settings → Hotkeys*, search "Obdyna".
 
 | Command | Suggested |
 |---|---|
@@ -304,7 +304,7 @@ settings). **No other hotkeys are set by default** — assign them under
 | Toggle fold recursively | — |
 | Diagnose | — |
 
-Every feature has a toggle in *Settings → Obdina*.
+Every feature has a toggle in *Settings → Obdyna*.
 
 ## Design notes
 
@@ -328,7 +328,7 @@ declined and the note is untouched.
 
 ## Internal APIs
 
-Some of what Obdina does has no public API, so it uses undocumented Obsidian and
+Some of what Obdyna does has no public API, so it uses undocumented Obsidian and
 CodeMirror internals:
 
 | Used for | Internal API |
@@ -345,7 +345,7 @@ release stops exposing one, the affected feature disables itself with an
 explanatory notice rather than breaking the plugin — the commands keep working
 even if the keymap can't be registered.
 
-If something misbehaves, run the **Obdina: Diagnose** command with the cursor on
+If something misbehaves, run the **Obdyna: Diagnose** command with the cursor on
 the problem line. It reports which condition stopped the last keypress and
 copies a full state dump to your clipboard for a bug report.
 
@@ -361,11 +361,11 @@ copies a full state dump to your clipboard for a bug report.
 
 ## Installation
 
-**From Obsidian** — *Settings → Community plugins → Browse*, search "Obdina".
+**From Obsidian** — *Settings → Community plugins → Browse*, search "Obdyna".
 
 **Manually** — download `main.js`, `manifest.json` and `styles.css` from the
 [latest release](https://github.com/chanon/obdina/releases/latest) into
-`<vault>/.obsidian/plugins/obdina/`, then reload Obsidian and enable it under
+`<vault>/.obsidian/plugins/obdyna/`, then reload Obsidian and enable it under
 *Settings → Community plugins*.
 
 ## License

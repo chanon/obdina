@@ -2,7 +2,7 @@
  * Copyright 2026 chanon
  * Licensed under the Apache License, Version 2.0. See LICENSE.
  *
- * Obdina — optional outline cosmetics.
+ * Obdyna — optional outline cosmetics.
  *
  * Obsidian injects this file whenever the plugin is enabled; there is no API to
  * load it conditionally. So EVERY rule here is scoped to a body class that
@@ -33,14 +33,14 @@
  * The ::after is absolutely positioned inside a centered flex parent, so it
  * grows from its own center and the text baseline does not move. */
 
-body.obdina-big-collapsed-bullets {
-	--obdina-collapsed-bullet-size: 0.55em;
+body.obdyna-big-collapsed-bullets {
+	--obdyna-collapsed-bullet-size: 0.55em;
 }
 
-body.obdina-big-collapsed-bullets li.is-collapsed .list-bullet::after,
-body.obdina-big-collapsed-bullets .is-collapsed ~ .cm-formatting-list .list-bullet::after {
-	width: var(--obdina-collapsed-bullet-size);
-	height: var(--obdina-collapsed-bullet-size);
+body.obdyna-big-collapsed-bullets li.is-collapsed .list-bullet::after,
+body.obdyna-big-collapsed-bullets .is-collapsed ~ .cm-formatting-list .list-bullet::after {
+	width: var(--obdyna-collapsed-bullet-size);
+	height: var(--obdyna-collapsed-bullet-size);
 	transition: width 100ms ease, height 100ms ease;
 }
 
@@ -48,8 +48,8 @@ body.obdina-big-collapsed-bullets .is-collapsed ~ .cm-formatting-list .list-bull
  * .list-bullet span. ::marker accepts only a handful of properties — font-size
  * is the one that scales the disc. Restricted to ul so ordered-list numbers
  * don't balloon. */
-body.obdina-big-collapsed-bullets ul > li.is-collapsed::marker {
-	font-size: var(--obdina-collapsed-marker-scale, 1.7em);
+body.obdyna-big-collapsed-bullets ul > li.is-collapsed::marker {
+	font-size: var(--obdyna-collapsed-marker-scale, 1.7em);
 }
 
 /* ── Breathing room between bullet and text ──────────────────────────────
@@ -61,20 +61,20 @@ body.obdina-big-collapsed-bullets ul > li.is-collapsed::marker {
  * margin-inline-end adds visual space without touching document text, and works
  * in both reading view and live preview since both use .list-bullet. */
 
-body.obdina-bullet-spacing {
-	--obdina-bullet-gap: 0.22em;
-	--obdina-checkbox-gap: 0.2em;
+body.obdyna-bullet-spacing {
+	--obdyna-bullet-gap: 0.22em;
+	--obdyna-checkbox-gap: 0.2em;
 }
 
-body.obdina-bullet-spacing .list-bullet {
-	margin-inline-end: var(--obdina-bullet-gap);
+body.obdyna-bullet-spacing .list-bullet {
+	margin-inline-end: var(--obdyna-bullet-gap);
 }
 
 /* Task lines render a checkbox instead of a bullet, so they need the matching
  * nudge or checklists end up tighter than the plain bullets beside them.
  * !important because themes commonly set this margin themselves. */
-body.obdina-bullet-spacing .task-list-item-checkbox {
-	margin-inline-end: var(--obdina-checkbox-gap) !important;
+body.obdyna-bullet-spacing .task-list-item-checkbox {
+	margin-inline-end: var(--obdyna-checkbox-gap) !important;
 }
 
 /* ── Drag and drop ────────────────────────────────────────────────
@@ -86,13 +86,13 @@ body.obdina-bullet-spacing .task-list-item-checkbox {
  * so .cm-editor needs to be a positioning context. It already is in practice;
  * the rule is stated anyway so this doesn't depend on that staying true. */
 
-.obdina-dragging {
+.obdyna-dragging {
 	cursor: grabbing;
 }
 
 /* Keep text from being selected mid-drag. The pointer left the bullet the
  * moment the drag started, so any selection it makes is noise. */
-.obdina-dragging .cm-content {
+.obdyna-dragging .cm-content {
 	user-select: none;
 }
 
@@ -103,11 +103,11 @@ body.obdina-bullet-spacing .task-list-item-checkbox {
 /* main.js sets `top` to the bottom edge of the .cm-line box it follows. The
  * nudge is a margin so it can be retuned from a snippet without touching the
  * inline style JavaScript writes. Positive moves the whole indicator down. */
-.obdina-drop-indicator {
+.obdyna-drop-indicator {
 	position: absolute;
 	right: 0;
 	height: 0;
-	margin-top: var(--obdina-drop-nudge, 1px);
+	margin-top: var(--obdyna-drop-nudge, 1px);
 	border-top: 2px solid var(--interactive-accent, #7f6df2);
 	border-radius: 1px;
 	pointer-events: none;
@@ -117,7 +117,7 @@ body.obdina-bullet-spacing .task-list-item-checkbox {
 
 /* A dot on the left end, so the indent level the drop will land at is readable
  * at a glance rather than having to be inferred from where the line starts. */
-.obdina-drop-indicator::before {
+.obdyna-drop-indicator::before {
 	content: "";
 	position: absolute;
 	left: -4px;
@@ -149,7 +149,7 @@ body.obdina-bullet-spacing .task-list-item-checkbox {
  *                top -9, height 4 → spans y -9..-5, centre y = -7 (rides the end)
  * The dot was left -3 and so sat 1px to the left of the stem. If either size
  * changes, recompute both offsets from these two lines. */
-.obdina-drop-indicator.obdina-drop-child::after {
+.obdyna-drop-indicator.obdyna-drop-child::after {
 	content: "";
 	position: absolute;
 	left: -1px;
@@ -163,7 +163,7 @@ body.obdina-bullet-spacing .task-list-item-checkbox {
 /* The dot moves to the TOP of the stem when nesting — up beside the parent row
  * rather than down on the insertion line — so it reads as "this hangs off the
  * item up there", which is what the drop does. */
-.obdina-drop-indicator.obdina-drop-child::before {
+.obdyna-drop-indicator.obdyna-drop-child::before {
 	left: -2px;
 	top: -9px;
 	width: 4px;
@@ -178,27 +178,27 @@ body.obdina-bullet-spacing .task-list-item-checkbox {
  * distinguish "what is moving" from "where it lands". A grey wash also stays
  * legible over any theme, in light and dark alike, without knowing anything
  * about the text colour underneath. */
-body.obdina-drag-tint .cm-line.obdina-drag-source {
-	background-color: var(--obdina-drag-source-bg, rgba(127, 137, 154, 0.15));
+body.obdyna-drag-tint .cm-line.obdyna-drag-source {
+	background-color: var(--obdyna-drag-source-bg, rgba(127, 137, 154, 0.15));
 	border-radius: 3px;
 }
 
 /* ── Bullets look grabbable ──────────────────────────────────────
- * Gated on obdina-drag-enabled, which tracks the dragAndDrop setting: promising
+ * Gated on obdyna-drag-enabled, which tracks the dragAndDrop setting: promising
  * a drag the plugin will not perform is worse than no affordance at all.
  *
  * A task's checkbox is deliberately left with its normal cursor. It is
  * draggable too, but clicking it is the primary action and `grab` would imply
  * otherwise. */
-body.obdina-drag-enabled .cm-formatting-list,
-body.obdina-drag-enabled .list-bullet,
-body.obdina-drag-enabled .cm-fold-indicator {
+body.obdyna-drag-enabled .cm-formatting-list,
+body.obdyna-drag-enabled .list-bullet,
+body.obdyna-drag-enabled .cm-fold-indicator {
 	cursor: grab;
 }
 
 /* Once a drag is under way the whole editor is in that mode, so nothing should
  * still be advertising `grab` or a text caret underneath the pointer. */
-.obdina-dragging,
-.obdina-dragging * {
+.obdyna-dragging,
+.obdyna-dragging * {
 	cursor: grabbing !important;
 }

@@ -17,7 +17,7 @@
 "use strict";
 
 /*
- * Obdina — Dynalist-style outlining for Obsidian.
+ * Obdyna — Dynalist-style outlining for Obsidian.
  *
  * Commands:
  *   fold-branch    fold the item at the cursor and everything under it
@@ -115,18 +115,18 @@ const DEFAULT_SETTINGS = {
 /* Shown in settings and as a notice: the one configuration in which
  * auto-nesting cannot work, stated plainly instead of failing silently. */
 const TASKS_BELOW_WARNING =
-	"Obdina: the Tasks plugin setting “Next recurrence appears on the line below” is ON. " +
+	"Obdyna: the Tasks plugin setting “Next recurrence appears on the line below” is ON. " +
 	"Nesting expects the new instance ABOVE the completed line, so it will not do anything. " +
 	"Turn that Tasks setting off to use this.";
 
 const BODY_CLASSES = {
-	biggerCollapsedBullets: "obdina-big-collapsed-bullets",
-	bulletSpacing: "obdina-bullet-spacing",
-	dragSourceTint: "obdina-drag-tint",
+	biggerCollapsedBullets: "obdyna-big-collapsed-bullets",
+	bulletSpacing: "obdyna-bullet-spacing",
+	dragSourceTint: "obdyna-drag-tint",
 	/* Not a cosmetic preference — it gates the grab cursor on bullets, which
 	 * would be a lie if dragging were switched off. Riding the same mechanism
 	 * keeps every settings-driven CSS rule in one table. */
-	dragAndDrop: "obdina-drag-enabled",
+	dragAndDrop: "obdyna-drag-enabled",
 };
 
 /* Pixels the pointer must travel before a press on a bullet counts as a
@@ -739,7 +739,7 @@ const dragMarkField =
 					for (const e of tr.effects) {
 						if (!e.is(dragMarkEffect)) continue;
 						if (!e.value) return cmDecoration.none;
-						const line = cmDecoration.line({ class: "obdina-drag-source" });
+						const line = cmDecoration.line({ class: "obdyna-drag-source" });
 						const ranges = [];
 						for (let n = e.value.from; n <= e.value.to; n++) {
 							if (n >= 0 && n < tr.state.doc.lines) ranges.push(line.range(tr.state.doc.line(n + 1).from));
@@ -754,10 +754,10 @@ const dragMarkField =
 
 /* ── plugin ──────────────────────────────────────────────────────────── */
 
-class ObdinaPlugin extends Plugin {
+class ObdynaPlugin extends Plugin {
 	async onload() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-		this.addSettingTab(new ObdinaSettingTab(this.app, this));
+		this.addSettingTab(new ObdynaSettingTab(this.app, this));
 		this.applyBodyClasses();
 
 		// The keymap reads this.settings at call time rather than being
@@ -1196,7 +1196,7 @@ class ObdinaPlugin extends Plugin {
 
 	/*
 	 * replaceRange() drops CodeMirror's fold decorations inside the replaced
-	 * span, so any collapsed child re-expands after an edit. Every Obdina
+	 * span, so any collapsed child re-expands after an edit. Every Obdyna
 	 * structural edit *permutes or re-indents* lines without adding or removing
 	 * any, so the fold set is still meaningful afterwards — it just needs its
 	 * line numbers pushed through the same transformation the text got.
@@ -1274,7 +1274,7 @@ class ObdinaPlugin extends Plugin {
 		return !!document.querySelector(".suggestion-container");
 	}
 
-	/* Returns true only when Obdina actually owns this keypress. Returning
+	/* Returns true only when Obdyna actually owns this keypress. Returning
 	 * false lets the event fall through to Obsidian's normal Tab handling, so
 	 * Tab still indents inside code blocks, moves between table cells, and
 	 * inserts a tab in ordinary prose. */
@@ -1359,7 +1359,7 @@ class ObdinaPlugin extends Plugin {
 			navigator.clipboard.writeText(dump);
 			copied = true;
 		} catch (e) {
-			console.log("[Obdina] diagnose", report); // clipboard blocked — fall back
+			console.log("[Obdyna] diagnose", report); // clipboard blocked — fall back
 		}
 
 		const why = !this._lastEnter
@@ -1384,7 +1384,7 @@ class ObdinaPlugin extends Plugin {
 										? "no subtree beneath this item"
 										: "all gates pass — Enter should have fired";
 		new Notice(
-			"Obdina: " + why + "\n\n" + (copied ? "Full report copied to clipboard." : "Full report in the developer console."),
+			"Obdyna: " + why + "\n\n" + (copied ? "Full report copied to clipboard." : "Full report in the developer console."),
 			15000
 		);
 	}
@@ -1491,7 +1491,7 @@ class ObdinaPlugin extends Plugin {
 	 *
 	 * This bypasses geometry entirely and steps by *visible line*, derived from
 	 * the fold set. getFoldInfo() reads CodeMirror's real fold state, so this
-	 * sees folds made by the gutter arrow exactly as well as Obdina's own.
+	 * sees folds made by the gutter arrow exactly as well as Obdyna's own.
 	 *
 	 * Deliberately narrow: it only claims the keypress when folds actually
 	 * change the answer. Everywhere else it returns false and CodeMirror's
@@ -1722,7 +1722,7 @@ class ObdinaPlugin extends Plugin {
 		editor.replaceRange("\n" + prefix, { line: end, ch: lines[end].length });
 		editor.setCursor({ line: end + 1, ch: prefix.length });
 
-		/* This is the one Obdina edit that changes the line count, so it can't
+		/* This is the one Obdyna edit that changes the line count, so it can't
 		 * reuse restoreFolds(), which assumes a permutation. The shift is
 		 * simple: one line appears after `end`. The fold we just typed past
 		 * ends exactly at `end`, so it survives untouched and the new sibling
@@ -1989,13 +1989,13 @@ class ObdinaPlugin extends Plugin {
 	/* ── Backspace at the start of an item ──────────────────────────────
 	 * At the start of an item, core's Backspace joins the line into the one
 	 * above — dragging the marker along, so "- a" + "- b" becomes "- a- b".
-	 * An outliner joins the *text* and drops the marker. Obdina does that, with
+	 * An outliner joins the *text* and drops the marker. Obdyna does that, with
 	 * two rules on top:
 	 *
 	 * (1) An item WITH children is never merged away. Core's join silently
 	 *     re-parents the whole subtree onto a line it was never under, and
 	 *     since the join also rewrites indentation, undo is the only way back.
-	 *     Obdina swallows the keypress: structural damage should cost more
+	 *     Obdyna swallows the keypress: structural damage should cost more
 	 *     than one key.
 	 *
 	 * (2) The text moves to the previous *visible item*, whatever its relation
@@ -2003,7 +2003,7 @@ class ObdinaPlugin extends Plugin {
 	 *     in another branch, or a COLLAPSED item. The collapsed case is the
 	 *     one core gets badly wrong: a fold is a replace decoration over the
 	 *     hidden subtree, so joining across its start tears it open and dumps
-	 *     every hidden child on screen. Obdina appends to the collapsed item's
+	 *     every hidden child on screen. Obdyna appends to the collapsed item's
 	 *     own line and re-applies the fold, so only text moves.
 	 *
 	 * Either way the cursor lands on the seam, before the text it carried up,
@@ -2279,7 +2279,7 @@ class ObdinaPlugin extends Plugin {
 			// list would indent the last item of that list.
 			const r = enclosingItem(lines, fenced, selFrom, tabWidth);
 			if (r < 0) {
-				if (!quiet) new Notice("Obdina: no list item at the cursor.");
+				if (!quiet) new Notice("Obdyna: no list item at the cursor.");
 				return false;
 			}
 			roots.push({ start: r, end: solo ? r : listBranchEnd(lines, r, tabWidth) });
@@ -2307,12 +2307,12 @@ class ObdinaPlugin extends Plugin {
 					// Dynalist parity: the first child of a parent can't indent
 					// further. Consume the key anyway so Tab doesn't fall through
 					// and inject literal whitespace into the outline.
-					if (!quiet) new Notice("Obdina: can't indent — no previous sibling to nest under.");
+					if (!quiet) new Notice("Obdyna: can't indent — no previous sibling to nest under.");
 					return true;
 				}
 			} else {
 				if (col === 0) {
-					if (!quiet) new Notice("Obdina: already at the top level.");
+					if (!quiet) new Notice("Obdyna: already at the top level.");
 					return true;
 				}
 				const parent = parentLine(lines, fenced, r.start, col, tabWidth);
@@ -2437,7 +2437,7 @@ class ObdinaPlugin extends Plugin {
 			if (direction === "up") {
 				const ps = prevSiblingLine(lines, fenced, s, col, tabWidth);
 				if (ps < 0) {
-					new Notice("Obdina: already the first item at this level.");
+					new Notice("Obdyna: already the first item at this level.");
 					return;
 				}
 				const prevEnd = listBranchEnd(lines, ps, tabWidth);
@@ -2449,7 +2449,7 @@ class ObdinaPlugin extends Plugin {
 			} else {
 				const ns = nextSiblingLine(lines, fenced, e + 1, col, tabWidth);
 				if (ns < 0) {
-					new Notice("Obdina: already the last item at this level.");
+					new Notice("Obdyna: already the last item at this level.");
 					return;
 				}
 				const nextEnd = listBranchEnd(lines, ns, tabWidth);
@@ -2865,9 +2865,9 @@ class ObdinaPlugin extends Plugin {
 				/* the tint is cosmetic */
 			}
 			try {
-				d.view.dom.classList.add("obdina-dragging");
+				d.view.dom.classList.add("obdyna-dragging");
 				d.indicator = d.view.dom.ownerDocument.createElement("div");
-				d.indicator.className = "obdina-drop-indicator";
+				d.indicator.className = "obdyna-drop-indicator";
 				d.indicator.style.display = "none";
 				d.view.dom.appendChild(d.indicator);
 			} catch (e) {
@@ -3007,7 +3007,7 @@ class ObdinaPlugin extends Plugin {
 					const refItem = enclosingItem(lines, fenced, refLine, tabWidth);
 					if (refItem >= 0) asChild = plan.col > indentColumns(lines[refItem], tabWidth);
 				}
-				d.indicator.classList.toggle("obdina-drop-child", asChild);
+				d.indicator.classList.toggle("obdyna-drop-child", asChild);
 			}
 		} catch (e) {
 			d.plan = null;
@@ -3052,7 +3052,7 @@ class ObdinaPlugin extends Plugin {
 		this._drag = null;
 		if (!d) return;
 		try {
-			d.view.dom.classList.remove("obdina-dragging");
+			d.view.dom.classList.remove("obdyna-dragging");
 			if (d.indicator) d.indicator.remove();
 			// Cleared before any drop is applied, so the tint can never be
 			// mapped onto the moved lines and left behind.
@@ -3122,7 +3122,7 @@ class ObdinaPlugin extends Plugin {
 		const view = ctx instanceof MarkdownView ? ctx : null;
 		const subView = view && view.currentMode;
 		if (!subView || typeof subView.applyFoldInfo !== "function" || typeof subView.getFoldInfo !== "function") {
-			new Notice("Obdina: this Obsidian version doesn't expose the fold API.");
+			new Notice("Obdyna: this Obsidian version doesn't expose the fold API.");
 			return;
 		}
 
@@ -3142,7 +3142,7 @@ class ObdinaPlugin extends Plugin {
 		const covering = foldStartCovering(liveFolds, cursorLine);
 		const root = findBranchRoot(lines, fenced, covering >= 0 ? covering : cursorLine);
 		if (root < 0) {
-			new Notice("Obdina: no heading or list item at the cursor.");
+			new Notice("Obdyna: no heading or list item at the cursor.");
 			return;
 		}
 
@@ -3158,7 +3158,7 @@ class ObdinaPlugin extends Plugin {
 			? headingBranchEnd(lines, root, hm[1].length, fenced)
 			: listBranchEnd(lines, root, tabWidth);
 		if (branchEnd <= root) {
-			new Notice("Obdina: nothing beneath this item.");
+			new Notice("Obdyna: nothing beneath this item.");
 			return;
 		}
 
@@ -3172,7 +3172,7 @@ class ObdinaPlugin extends Plugin {
 		if (mode === "fold") {
 			const found = collectFolds(lines, fenced, start, branchEnd, tabWidth);
 			if (found.length === 0) {
-				new Notice("Obdina: no foldable children here.");
+				new Notice("Obdyna: no foldable children here.");
 				return;
 			}
 			for (const f of found) byStart.set(f.from, f);
@@ -3281,7 +3281,7 @@ class ObdinaPlugin extends Plugin {
 	}
 }
 
-class ObdinaSettingTab extends PluginSettingTab {
+class ObdynaSettingTab extends PluginSettingTab {
 	constructor(app, plugin) {
 		super(app, plugin);
 		this.plugin = plugin;
@@ -3514,7 +3514,7 @@ class ObdinaSettingTab extends PluginSettingTab {
 			.setDesc(
 				"Enlarge the bullet of a collapsed item so it reads as \u201cthere is more inside\u201d at a glance. " +
 					"Obsidian already recolors collapsed bullets; this adds size to that signal, which matters most if you hide the \u201c\u2026\u201d fold marker. " +
-					"Retune it from a snippet with --obdina-collapsed-bullet-size."
+					"Retune it from a snippet with --obdyna-collapsed-bullet-size."
 			)
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.biggerCollapsedBullets).onChange(async (v) => {
@@ -3528,7 +3528,7 @@ class ObdinaSettingTab extends PluginSettingTab {
 			.setDesc(
 				"Obsidian has no setting for this gap \u2014 it is just the literal space after the \u201c-\u201d in your note. " +
 					"Adds a small visual margin instead, without touching the text. Checkboxes get a matching nudge. " +
-					"Retune with --obdina-bullet-gap / --obdina-checkbox-gap."
+					"Retune with --obdyna-bullet-gap / --obdyna-checkbox-gap."
 			)
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.bulletSpacing).onChange(async (v) => {
@@ -3592,4 +3592,4 @@ function shiftPos(pos, charDelta) {
 	return { line: pos.line, ch: Math.max(0, pos.ch + d) };
 }
 
-module.exports = ObdinaPlugin;
+module.exports = ObdynaPlugin;
