@@ -1,4 +1,4 @@
-# Obdina
+# Obdina Outliner
 
 Dynalist-style outlining for [Obsidian](https://obsidian.md).
 

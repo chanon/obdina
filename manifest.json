@@ -1,9 +1,9 @@
 {
 	"id": "obdina",
-	"name": "Obdina",
+	"name": "Obdina Outliner",
 	"version": "0.10.0",
 	"minAppVersion": "1.5.0",
-	"description": "Dynalist-style outlining: fold, indent, outdent and move list items together with their subitems.",
+	"description": "Dynalist-style outlining for lists and tasks: drag and drop, fold, indent and move items with their subitems, plus outline-aware Enter, Backspace, Delete and Select all.",
 	"author": "chanon",
 	"authorUrl": "https://github.com/chanon",
 	"isDesktopOnly": false
